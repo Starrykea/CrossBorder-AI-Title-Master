@@ -1,2 +1,27 @@
 # CrossBorder-AI-Title-Master
 An AI-powered bulk title optimization tool for cross-border e-commerce (Mercado Libre, Amazon) based on Gemini 2.0.
+# 🚀 跨境电商 AI 标题批量优化大师 (Professional Edition)
+
+这是一款专为跨境电商卖家（Mercado Libre, Amazon, Shopee等）设计的 AI 自动化工具。通过接入 Gemini 2.0 Flash 引擎，实现海量商品标题的智能精简与关键词优化。
+
+## ✨ 核心功能
+* **多平台适配**：针对美客多(60字符)、亚马逊等平台算法深度优化。
+* **🔑 多 Key 轮询**：支持填入多个免费 API Key，自动切换，彻底解决 429 频率限制。
+* **⚡ 实时监控**：UI 界面实时滚动处理日志，API 调用、文件保存一目了然。
+* **🛡️ 保底机制**：AI 异常时自动启动强制截断逻辑，确保 100% 任务完成率。
+* **💾 安全覆盖**：直接覆盖原标题列，同时自动创建原始数据备份，无需手动粘贴。
+
+---
+
+## 🛠️ 快速上手
+
+### 1. 环境准备
+确保你的电脑安装了 **Python 3.9+**。
+
+### 2. 安装依赖
+打开终端（Terminal），进入项目根目录执行：
+```bash
+pip install -r requirements.txt
+
+###3. 执行命令
+终端执行streamlit run ui/client_app.py或者找到run_aoo.py运行一下即可
