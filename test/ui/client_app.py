@@ -1,34 +1,41 @@
 import sys
-
 import streamlit as st
 import pandas as pd
 import os
 import time
-# --- 跨目录导入逻辑 ---
-script_dir = r'E:\qq\PyCharmMiscProject\PyCharmMiscProject\test\core'
-if script_dir not in sys.path:
-    sys.path.append(script_dir)
+import io
+
+# --- 跨目录导入逻辑 (兼容本地与云端) ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+
+if project_root not in sys.path:
+    sys.path.append(project_root)
+core_path = os.path.join(project_root, "core")
+if core_path not in sys.path:
+    sys.path.append(core_path)
 
 try:
-    from trade import start_optimization_task
+    from core.trade import start_optimization_task
 except ImportError:
-    st.error(f"❌ 找不到 trade.py。请确保该文件在路径: {script_dir}")
-    st.stop()
+    try:
+        from trade import start_optimization_task
+    except ImportError:
+        st.error("❌ 无法加载核心逻辑模块。请检查项目结构是否包含 core/trade.py")
+        st.stop()
+
 # --- 基础配置 ---
 st.set_page_config(page_title="跨境AI大师专业版", layout="wide", page_icon="🚀")
 
-# 初始化 Session State
+# --- 初始化 Session State ---
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 if 'char_limit' not in st.session_state:
     st.session_state.char_limit = 60
-if 'folder_path' not in st.session_state:
-    st.session_state.folder_path = r'C:\Users\Administrator\Desktop\text'
 
-# ================= 1. 权限校验层 (EXE 启动首屏) =================
+# ================= 1. 权限校验层 =================
 if not st.session_state.authenticated:
     st.title("🔐 软件授权验证")
-    # 居中布局尝试
     _, auth_col, _ = st.columns([1, 2, 1])
     with auth_col:
         auth_code = st.text_input("请输入卡密 (License Key)", type="password", help="请输入 6 位授权码")
@@ -40,174 +47,122 @@ if not st.session_state.authenticated:
                 st.error("❌ 卡密无效，请联系管理员")
     st.stop()
 
-# ================= 2. 主业务层 (授权后可见) =================
+# ================= 2. 主业务层 =================
 
-# 侧边栏：全局任务配置
+# --- 侧边栏：全局配置 ---
 with st.sidebar:
     st.header("⚙️ 全局配置")
 
-    # --- 动态 Key 管理区 ---
-    st.subheader("🔑 API 密钥池")
-    st.caption("一行一个 Key，系统会自动轮询使用")
-
-    # 使用 text_area 让用户一行输入一个 Key
-    raw_keys = st.text_area(
-        "请输入 Gemini API Keys:",
-        height=150,
-        placeholder="AIzaSyA...\nAIzaSyB...\nAIzaSyC...",
-        help="支持多个 Key 轮询，每行一个"
+    # A. 数据导入 (云端专用：文件上传器)
+    st.subheader("📁 数据导入")
+    uploaded_files = st.file_uploader(
+        "选择 Excel 文件 (支持多选)",
+        type=['xlsx', 'xls'],
+        accept_multiple_files=True,
+        help="请上传需要优化的 Excel 表格"
     )
 
-    # 自动过滤掉空行和空格
+    st.divider()
+
+    # B. API 密钥管理
+    st.subheader("🔑 API 密钥池")
+    raw_keys = st.text_area(
+        "请输入 Gemini API Keys (一行一个):",
+        height=120,
+        placeholder="AIzaSy...",
+        help="系统将自动轮询使用这些 Key"
+    )
     user_keys = [k.strip() for k in raw_keys.split('\n') if k.strip()]
 
-    if not user_keys:
-        st.warning("⚠️ 请输入至少一个有效的 API Key")
-    else:
+    if user_keys:
         st.success(f"✅ 已加载 {len(user_keys)} 个密钥")
+    else:
+        st.warning("⚠️ 需填入 API Key 才能启动")
 
     st.divider()
 
-    # --- A. 优化内容多选 ---
-    st.subheader("1. 优化目标字段")
-    selected_tasks = st.multiselect(
-        "请勾选需要优化的内容：",
-        ["商品名称 (Title/Name)", "商品描述 (Description)", "五点描述 (Bullet Points)", "搜索关键词 (Keywords)"],
-        default=["商品名称 (Title/Name)"]
-    )
+    # C. 任务参数
+    target_platform = st.selectbox("目标平台", ["Mercado Libre", "Amazon", "Shopee", "TikTok Shop"])
 
-    st.divider()
-    # --- client_app.py 侧边栏新增部分 ---
-    st.subheader("⚡ 性能与频率限制")
-
-    # 批量大小：一次发给 AI 多少条
-    batch_size = st.slider("单批次处理数量", min_value=1, max_value=50, value=30,
-                           help="免费版建议 15-30，付费版可设为 50")
-
-    # 睡眠时间：每批次处理完等多久
-    sleep_time = st.slider("批次间睡眠时间 (秒)", min_value=1, max_value=120, value=60,
-                           help="针对 429 错误：免费版建议 65秒，付费版设为 1-3秒")
-    # --- B. 平台与字符限制 ---
-    st.subheader("2. 平台与长度控制")
-    target_platform = st.selectbox(
-        "目标电商平台",
-        ["Mercado Libre", "Amazon", "Shopee", "Lazada", "TikTok Shop"]
-    )
-
-    st.write("📏 标题长度限制")
+    st.write("📏 标题字符限制")
     c1, c2, c3 = st.columns([1, 2, 1])
     with c1:
         if st.button("➖"): st.session_state.char_limit -= 1
     with c3:
         if st.button("➕"): st.session_state.char_limit += 1
     with c2:
-        # 实时同步数字输入框
-        st.session_state.char_limit = st.number_input(
-            "Limit", value=st.session_state.char_limit, label_visibility="collapsed"
-        )
+        st.session_state.char_limit = st.number_input("Limit", value=st.session_state.char_limit,
+                                                      label_visibility="collapsed")
+
+    target_lang = st.selectbox("目标语言", ["保持原样", "English", "Spanish", "Portuguese", "Chinese"])
 
     st.divider()
 
-    # --- C. 多语言翻译 ---
-    st.subheader("3. 翻译配置")
-    target_lang = st.selectbox(
-        "翻译为目标语言：",
-        ["保持原样", "English (英语)", "Chinese (中文)", "French (法语)", "Japanese (日语)", "German (德语)"]
-    )
+    batch_size = st.slider("单批次处理数量", 1, 50, 20)
+    sleep_time = st.slider("批次间休眠 (秒)", 1, 120, 65)
 
-    st.divider()
-    st.info(f"已选任务：{len(selected_tasks)} 项")
-
-# 主页面内容
+# --- 主界面 ---
 st.title("🚀 跨境电商 AI 批量优化系统")
 
-tab_excel, tab_process = st.tabs(["📂 数据导入与路径", "⚡ 任务监控中心"])
+# 检查上传情况
+if not uploaded_files:
+    st.info("💡 请在左侧侧边栏上传 Excel 文件以开始任务。")
+    st.stop()
 
-# --- Tab 1: 数据导入 (改为手动路径输入) ---
-with tab_excel:
-    st.subheader("第一步：指定数据存放路径")
+# 任务看板
+st.subheader("📊 待处理清单")
+file_info = [{"文件名": f.name, "大小": f"{f.size / 1024:.2f} KB"} for f in uploaded_files]
+st.table(pd.DataFrame(file_info))
 
-    # 使用输入框替代弹窗，提高 EXE 稳定性
-    path_input = st.text_input(
-        "请输入或粘贴存放 Excel 的文件夹绝对路径：",
-        value=st.session_state.folder_path,
-        placeholder="例如: C:\\Users\\Desktop\\Project"
-    )
-
-    # 自动保存路径到 session
-    st.session_state.folder_path = path_input
-
-    if st.button("🔍 扫描并预处理文件夹"):
-        if os.path.exists(path_input):
-            files = [f for f in os.listdir(path_input) if f.endswith(('.xlsx', '.xls'))]
-            if files:
-                st.success(f"✅ 扫描成功！在路径下发现 {len(files)} 个 Excel 文件。")
-                for f in files:
-                    st.text(f"  📄 {f}")
-            else:
-                st.warning("⚠️ 路径正确，但文件夹内没有找到 Excel 文件。")
-        else:
-            st.error("❌ 路径不存在，请检查是否输入正确。")
-
-# --- Tab 2: 处理中心 ---
-with tab_process:
-    st.subheader("第二步：确认任务清单")
-
-    if not selected_tasks:
-        st.error("请在左侧侧边栏至少勾选一项优化任务。")
+# --- 任务处理中心 ---
+st.divider()
+if st.button("🔥 启动 AI 批量优化引擎", type="primary", use_container_width=True):
+    if not user_keys:
+        st.error("❌ 请先在左侧配置 API Key！")
     else:
-        # 任务看板
-        task_str = " -> ".join(selected_tasks)
-        st.warning(f"当前流水线：{task_str}")
+        with st.status("🚀 正在执行 AI 优化任务...", expanded=True) as status:
+            log_area = st.empty()
+            all_logs = []
 
-        col_info1, col_info2 = st.columns(2)
-        with col_info1:
-            st.markdown(f"""
-            **任务明细：**
-            - 目标平台: `{target_platform}`
-            - 目标语言: `{target_lang}`
-            - 处理目录: `{st.session_state.folder_path}`
-            """)
-        with col_info2:
-            st.markdown(f"""
-            **限制规范：**
-            - 名称限制: `{st.session_state.char_limit}` 字符
-            - 描述策略: `智能保留 HTML 标签`
-            """)
+            # 调用核心逻辑
+            # 注意：传入的是 uploaded_files 对象列表，而不是路径
+            task_gen = start_optimization_task(
+                uploaded_files=uploaded_files,
+                platform=target_platform,
+                char_limit=st.session_state.char_limit,
+                language=target_lang,
+                api_keys=user_keys,
+                batch_size=batch_size,
+                sleep_time=sleep_time
+            )
 
-        st.divider()
+            # 迭代生成器获取日志和结果
+            for msg in task_gen:
+                if msg == "FINISH_SIGNAL":
+                    # 获取最终的处理结果数据
+                    final_results = next(task_gen)
+                    status.update(label="✅ 任务全部完成！请下载结果", state="complete")
 
-        # --- client_app.py 修复后的启动逻辑 ---
+                    st.divider()
+                    st.subheader("📥 下载优化后的文件")
 
-        if st.button("🔥 启动 AI 批量优化引擎", type="primary"):
+                    # 为每个文件生成下载按钮
+                    for file_name, df_result in final_results:
+                        # 将 DataFrame 转换为 Excel 字节流
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            df_result.to_excel(writer, index=False)
 
-            # 1. 检查 API Key 是否为空
-            if not user_keys:
-                st.error("❌ 错误：请在左侧边栏输入至少一个 API Key！")
-            else:
-                with st.status("🚀 实时任务监控后台", expanded=True) as status:
-                    log_area = st.empty()  # 这里的空位用来放滚动日志
-                    all_logs = []
-
-                    # 2. 【关键修复】：将变量填入括号，对应你 UI 上的定义
-                    # 注意：这里的变量名必须和你前面定义的 selectbox/slider 名一致
-                    for log_msg in start_optimization_task(
-                            folder_path=st.session_state.folder_path,  # 来自 Tab 1 的输入
-                            platform=target_platform,  # 来自侧边栏 selectbox
-                            char_limit=st.session_state.char_limit,  # 来自侧边栏 number_input
-                            language=target_lang,  # 来自侧边栏 selectbox
-                            api_keys=user_keys,  # 来自侧边栏 text_area 解析后的列表
-                            batch_size=batch_size,  # 来自侧边栏 slider
-                            sleep_time=sleep_time  # 来自侧边栏 slider
-                    ):
-                        # 3. 实时滚动显示日志
-                        current_time = time.strftime("%H:%M:%S", time.localtime())
-                        all_logs.append(f"[{current_time}] {log_msg}")
-
-                        # 始终只展示最新的 12 行，保持界面整洁
-                        log_area.code("\n".join(all_logs[-12:]), language="bash")
-
-                        # 如果任务结束，更新状态
-                        if "全部完成" in log_msg:
-                            status.update(label="✅ 任务圆满结束", state="complete", expanded=False)
-                            st.balloons()
+                        st.download_button(
+                            label=f"点击下载: Optimized_{file_name}",
+                            data=output.getvalue(),
+                            file_name=f"Optimized_{file_name}",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=file_name  # 唯一键防止冲突
+                        )
+                    st.balloons()
+                else:
+                    # 正常的进度日志显示
+                    current_time = time.strftime("%H:%M:%S", time.localtime())
+                    all_logs.append(f"[{current_time}] {msg}")
+                    log_area.code("\n".join(all_logs[-15:]), language="bash")
