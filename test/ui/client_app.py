@@ -5,24 +5,24 @@ import os
 import time
 import io
 
-# --- 跨目录导入逻辑 (兼容本地与云端) ---
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
+# 1. 获取 client_app.py 的绝对路径 (E:\...\test\ui\client_app.py)
+current_script_path = os.path.abspath(__file__)
+# 2. 获取 ui 文件夹路径 (E:\...\test\ui)
+ui_dir = os.path.dirname(current_script_path)
+# 3. 获取 test 文件夹路径 (E:\...\test)
+test_dir = os.path.dirname(ui_dir)
 
-if project_root not in sys.path:
-    sys.path.append(project_root)
-core_path = os.path.join(project_root, "core")
-if core_path not in sys.path:
-    sys.path.append(core_path)
+# 将 test 目录加入系统路径，这样才能识别到 core.trade
+if test_dir not in sys.path:
+    sys.path.append(test_dir)
 
+# 4. 尝试导入
 try:
     from core.trade import start_optimization_task
-except ImportError:
-    try:
-        from trade import start_optimization_task
-    except ImportError:
-        st.error("❌ 无法加载核心逻辑模块。请检查项目结构是否包含 core/trade.py")
-        st.stop()
+except ImportError as e:
+    st.error(f"❌ 找不到核心模块。错误详情: {e}")
+    st.info(f"当前尝试搜索的根目录为: {test_dir}")
+    st.stop()
 
 # --- 基础配置 ---
 st.set_page_config(page_title="跨境AI大师专业版", layout="wide", page_icon="🚀")
