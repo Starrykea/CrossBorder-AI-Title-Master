@@ -77,7 +77,7 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
         # 直接从内存读取
         df = pd.read_excel(file_obj)
 
-        target_col = next((c for c in df.columns if any(k in str(c) for k in ['标题', 'Title', 'Name', '商品名称'])),
+        target_col = next((c for c in df.columns if any(k in str(c) for k in ['标题', 'Title', 'Name', '商品名称','title','name'])),
                           None)
         if not target_col:
             yield f"⚠️ 警告: 文件 {file_obj.name} 找不到标题列，已跳过。"
