@@ -6,23 +6,23 @@ import time
 import io
 
 # --- 跨目录导入逻辑 ---
+# 获取当前文件的绝对路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
+
+# 无论在本地还是云端，直接定位到 'test' 这一层作为根目录
+# 假设你的 client_app.py 在 test/ui/ 目录下，那么上一级就是根
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
 
 if project_root not in sys.path:
-    sys.path.append(project_root)
-core_path = os.path.join(project_root, "core")
-if core_path not in sys.path:
-    sys.path.append(core_path)
+    # 使用 insert(0, ...) 确保你的项目路径优先级最高
+    sys.path.insert(0, project_root)
 
 try:
+    # 只要 project_root 在路径里，这里就能通过 文件夹名.文件名 导入
     from core.trade import start_optimization_task
-except ImportError:
-    try:
-        from trade import start_optimization_task
-    except ImportError:
-        st.error("❌ 无法加载核心逻辑模块。请检查项目结构是否包含 core/trade.py")
-        st.stop()
+except ImportError as e:
+    st.error(f"❌ 云端导入失败！\n根目录: {project_root}\n已加载路径: {sys.path[:3]}\n错误: {e}")
+    st.stop()
 
 # --- 基础配置 ---
 st.set_page_config(page_title="跨境AI大师专业版", layout="wide", page_icon="🚀")
