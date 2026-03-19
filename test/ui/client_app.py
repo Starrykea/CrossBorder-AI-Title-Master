@@ -58,12 +58,12 @@ with st.sidebar:
         ["Google Gemini (官方)", "DeepSeek (推荐)", "自定义中转"]
     )
 
-    if engine_type == "Google Gemini (官方)":
+    if engine_type == "Google Gemini ":
         # Google 的 OpenAI 兼容地址
         base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-        model_name = "gemini-2.0-flash"  # 或者是你喜欢的其他版本
+        model_name = "gemini-2.5-flash"  # 或者是你喜欢的其他版本
         st.info("💡 请在下方输入你的 Google AI Studio API Key")
-    elif engine_type == "DeepSeek (推荐)":
+    elif engine_type == "DeepSeek ":
         base_url = "https://api.deepseek.com"
         model_name = "deepseek-chat"
         st.info("💡 请在下方输入 DeepSeek API Key")
