@@ -2,23 +2,19 @@ import pandas as pd
 import time
 import re
 import itertools
-import io
 from openai import OpenAI
 
 
 def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, model_name, base_url):
     """
-    加固后的 AI 引擎：引入去重映射逻辑，保证相同输入必有相同输出
+    修改后的引擎：增加状态标识返回
     """
     # --- 1. 内部去重逻辑 ---
-    # 建立 反向映射 {原始标题: [ID1, ID2...]}
     reverse_map = {}
     for idx, title in id_titles_dict.items():
         reverse_map.setdefault(title, []).append(idx)
 
-    # 提取唯一的标题进行处理
     unique_titles = list(reverse_map.keys())
-    # 重新编号，发给 AI 的 Payload 只包含不重复的内容
     unique_payload_dict = {i: unique_titles[i] for i in range(len(unique_titles))}
     input_payload = "\n".join([f"#{k}: {v}" for k, v in unique_payload_dict.items()])
 
@@ -27,78 +23,68 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
         f"1. 要求重写优化标题，中间不要有逗号否则浪费字符。\n"
         f"2. 严格控制在 {char_limit} 字符内。格式：'#ID: 结果'。\n"
         f"3. 严禁出现不完整的词汇，严禁有侵权词汇\n"
-        f"4. 必须保持一致性：对于内容相同的输入，必须给出完全相同的优化结果。\n"
+        f"4. 手机、平板配件前面必须加for，防止侵权\n"
         f"待处理：\n{input_payload}"
     )
 
     for attempt in range(1, 4):
-        current_key = next(key_pool)
-        client = OpenAI(api_key=current_key, base_url=base_url)
-
         try:
+            current_key = next(key_pool)
+            client = OpenAI(api_key=current_key, base_url=base_url)
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[
-                    {"role": "system",
-                     "content": "You are a professional e-commerce SEO expert. You output stable and consistent titles."},
+                    {"role": "system", "content": "You are a professional e-commerce SEO expert."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0  # 💡 关键：设置为 0 保证确定性输出
+                temperature=0
             )
             output = response.choices[0].message.content
 
-            # --- 2. 结果解析与分发 ---
+            # --- 2. 结果解析 ---
             unique_results = {}
             matches = re.findall(r'#(\d+)[:：](.*)', output)
             for m_id, m_content in matches:
                 unique_results[int(m_id)] = m_content.strip()[:char_limit]
 
-            # 将 AI 返回的唯一结果，根据 reverse_map 回填给所有原始 ID
-            final_batch_results = {}
-            for u_idx, optimized_text in unique_results.items():
-                original_title = unique_payload_dict[u_idx]
-                original_ids = reverse_map[original_title]
-                for o_id in original_ids:
-                    final_batch_results[o_id] = optimized_text
+            # 检查解析数量是否匹配，确保AI没有漏掉数据
+            if len(unique_results) > 0:
+                final_batch_results = {}
+                for u_idx, optimized_text in unique_results.items():
+                    if u_idx in unique_payload_dict:
+                        original_ids = reverse_map[unique_payload_dict[u_idx]]
+                        for o_id in original_ids:
+                            final_batch_results[o_id] = optimized_text
 
-            if len(final_batch_results) > 0:
-                return final_batch_results, f"✅ {model_name} 第 {attempt} 次尝试成功 (已处理重复内容)"
+                # 成功返回：结果，状态码，日志
+                return final_batch_results, "Optimized", f"✅ {model_name} 处理成功"
 
         except Exception as e:
-            print(f"❌ 调试报错详情 (Attempt {attempt}): {str(e)}")
             if attempt < 3:
                 time.sleep(5)
             continue
 
+    # --- 💡 核心改动：触发保底逻辑时的返回 ---
     fallback_results = {idx: str(original)[:char_limit].strip() for idx, original in id_titles_dict.items()}
-    return fallback_results, "⚠️ AI 调用失败，已启动保底截断逻辑"
+    return fallback_results, "Fallback_Truncated", "⚠️ AI调用失败，已执行保底截断"
 
 
 def start_optimization_task(uploaded_files, platform, char_limit, language, api_keys, batch_size, sleep_time,
                             model_name, base_url):
-    """
-    Streamlit 任务启动器
-    """
     key_pool = itertools.cycle(api_keys)
-    yield f"🚀 系统启动 | 引擎: {model_name} | 确定性模式: ON (Temp=0)"
+    yield f"🚀 系统启动 | 引擎: {model_name}"
 
     processed_results = []
 
     for file_obj in uploaded_files:
-        yield f"-------------------------------------------"
         yield f"📂 正在处理: {file_obj.name}"
-
         df = pd.read_excel(file_obj)
-        # 自动识别列名
+
         target_col = next(
-            (c for c in df.columns if any(k in str(c).lower() for k in ['标题', 'title', 'name', '商品名称'])), None)
-
+            (c for c in df.columns if any(k in str(c).lower() for k in ['标题', 'title', 'name', '商品名称','商品标题'])), None)
         if not target_col:
-            yield f"⚠️ 警告: 找不到标题列，跳过文件。"
+            yield f"⚠️ 警告: 找不到标题列，跳过。"
             continue
-
-        if 'Original_Backup' not in df.columns:
-            df['Original_Backup'] = df[target_col]
 
         if 'AI_Status' not in df.columns:
             df['AI_Status'] = None
@@ -111,23 +97,29 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
             processed_results.append((file_obj.name, df))
             continue
 
-        yield f"📊 待优化: {total} 条"
-
         for i in range(0, total, batch_size):
             batch_idx = pending_indices[i: i + batch_size]
             batch_dict = {idx: df.at[idx, target_col] for idx in batch_idx}
 
-            results, status_msg = ai_rewrite_engine(
+            # 接收三个返回值
+            results, status_code, log_msg = ai_rewrite_engine(
                 batch_dict, char_limit, platform, language, key_pool, model_name, base_url
             )
-            yield f"📝 [进度 {i + len(batch_idx)}/{total}] {status_msg}"
+            yield f"📝 [进度 {i + len(batch_idx)}/{total}] {log_msg}"
 
+            # 将内容和对应的状态（Optimized 或 Fallback_Truncated）写入 Excel
             for idx, content in results.items():
                 df.at[idx, target_col] = content
-                df.at[idx, 'AI_Status'] = "Optimized"
+                df.at[idx, 'AI_Status'] = status_code
 
             if i + batch_size < total:
                 time.sleep(sleep_time)
+
+        # --- 💡 核心新增：统计功能 ---
+        stats = df['AI_Status'].value_counts()
+        fallback_count = stats.get('Fallback_Truncated', 0)
+        optimized_count = stats.get('Optimized', 0)
+        yield f"📊 文件统计：正常优化 {optimized_count} 条，保底截断 {fallback_count} 条。"
 
         processed_results.append((file_obj.name, df))
 
