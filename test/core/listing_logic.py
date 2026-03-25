@@ -74,71 +74,108 @@ def safe_write(ws, row, col, value):
             cell.value = val_str
 
 
-def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_config, static_fills, upc_list=None):
-    """执行最终的表格填充任务"""
+def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_config, static_fills, upc_list=None,
+                            start_row=None):
+    """执行最终的表格填充任务 (已通过动态列定位锁定起始行)"""
     in_io = io.BytesIO(template_bytes)
     wb = openpyxl.load_workbook(in_io)
     ws = wb[sheet_name]
 
-    # 1. 寻找表头行 (1-10行遍历)
+    # 1. 寻找表头行 & 确定核心列索引
     header_row_idx = 1
     headers = []
-    for i in range(1, 11):
-        row_vals = [str(ws.cell(row=i, column=j).value) for j in range(1, ws.max_column + 1)]
-        if any("Title" in (v or "") for v in row_vals):
+    h_counts = {}
+
+    # 初始默认值，稍后会通过循环动态修正
+    char_count_col_idx = 2
+
+    # 扫描前 15 行寻找表头
+    for i in range(1, 15):
+        row_vals_raw = []
+        for j in range(1, 100):
+            val = ws.cell(row=i, column=j).value
+            # 这里的清理逻辑必须和 UI 端完全一致：粉碎换行符
+            val_clean = str(val or "").replace('\n', ' ').replace('\r', ' ').strip()
+            row_vals_raw.append(val_clean)
+
+        # 只要这一行包含 "Title"，就认定为表头行
+        if any("Title" in v for v in row_vals_raw):
             header_row_idx = i
-            headers = row_vals
+
+            # --- 关键修正：动态锁定 Number of characters 所在的列 ---
+            for idx, n in enumerate(row_vals_raw):
+                # 寻找字符计数列的位置
+                if "Number of characters" in n:
+                    char_count_col_idx = idx + 1  # 索引从1开始
+
+                # 处理 Mexico 等重名列的计数逻辑 (保持你原有的逻辑)
+                if n == "Mexico":
+                    h_counts["Mexico"] = h_counts.get("Mexico", 0) + 1
+                    if h_counts["Mexico"] == 1:
+                        final_name = "Mexico (full)"
+                    elif h_counts["Mexico"] == 2:
+                        final_name = "Mexico"
+                    else:
+                        final_name = f"Mexico_{h_counts['Mexico']}"
+                elif n == "" or n == "None":
+                    final_name = ""
+                else:
+                    h_counts[n] = h_counts.get(n, 0) + 1
+                    final_name = f"{n}_{h_counts[n]}" if h_counts[n] > 1 else n
+
+                headers.append(final_name)
             break
 
     # 建立【列名】到【列索引】的映射
-    col_map = {name: idx + 1 for idx, name in enumerate(headers) if name and name != 'None'}
+    col_map = {name: idx + 1 for idx, name in enumerate(headers) if name != ''}
 
-    # 2. 识别核心功能列
+    # --- 2. 核心逻辑：寻找第一个公式行作为 start_row ---
+    if start_row is None:
+        for r in range(header_row_idx + 1, 40):
+            cell_val = ws.cell(row=r, column=char_count_col_idx).value
+            val_str = str(cell_val or "").strip()
+
+            # 找到第一个公式，立即锁定
+            if "=LEN" in val_str.upper():
+                start_row = r
+                break
+
+        # 保底逻辑
+        if not start_row:
+            start_row = header_row_idx + 4
+    # 3. 识别功能列名（用于后续填充）
     ml_upc_key = next((k for k in col_map.keys() if "Universal product code" in k), None)
     color_key = next((k for k in col_map.keys() if "Color" in k), None)
     sku_key = next((k for k in col_map.keys() if "SKU" in k), None)
 
-    # --- Color 随机保底逻辑修正 ---
-    # 这里的 static_fills[color_key] 拿的是 UI 界面选的值
-    json_color_val = str(static_fills.get(color_key, "")).strip()
-    match = re.match(r"([a-zA-Z]+)([0-9]*)", json_color_val)
-
-    if match and match.group(1):
-        color_prefix = match.group(1)
-        color_num = int(match.group(2)) if match.group(2) else 100
-    else:
-        # 如果 JSON 没写 Color 或格式不对，随机一个字母 + 100
-        color_prefix = random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-        color_num = 100
-
-    # 3. 执行填充逻辑
-    start_row = header_row_idx + 4
-    for i, row in source_df.iterrows():
+    # 4. 执行数据填充
+    for i, (_, row_data) in enumerate(source_df.iterrows()):
         curr_row = start_row + i
 
-        # A. 标题和图片
-        t_idx = col_map.get(next((k for k in col_map.keys() if "Title" in k), ""))
-        p_idx = col_map.get(next((k for k in col_map.keys() if "Photos" in k), ""))
-        if t_idx: safe_write(ws, curr_row, t_idx, row[mapping_config['title_col']])
-        if p_idx: safe_write(ws, curr_row, p_idx, row[mapping_config['img_col']])
+        # 标题和图片写入
+        real_title_key = next((k for k in col_map.keys() if "Title" in k and "Number" not in k), None)
+        if real_title_key:
+            safe_write(ws, curr_row, col_map[real_title_key], row_data[mapping_config['title_col']])
 
-        # B. SKU 自动生成
+        photo_key = next((k for k in col_map.keys() if "Photos" in k), None)
+        if photo_key:
+            safe_write(ws, curr_row, col_map[photo_key], row_data[mapping_config['img_col']])
+
+        # SKU 自动生成
         if sku_key:
             safe_write(ws, curr_row, col_map[sku_key], f"ML-{int(time.time()) % 100000}-{i}")
 
-        # C. UPC 批量填充 (独立逻辑，互不干扰)
+        # UPC 填充
         if ml_upc_key and upc_list and i < len(upc_list):
             safe_write(ws, curr_row, col_map[ml_upc_key], upc_list[i])
 
-        # D. 静态属性与 Color 递增
+        # 静态字段填充 (Brand, Condition, Package 等)
         for header, val in static_fills.items():
             if header in col_map:
+                # 颜色列跳过，如果需要随机颜色逻辑可在此添加
                 if header == color_key:
-                    # 字母前缀 + 随行递增的数字
-                    safe_write(ws, curr_row, col_map[header], f"{color_prefix}{color_num + i}")
-                else:
-                    # 普通属性直接写入 (如 Brand, Material)
-                    safe_write(ws, curr_row, col_map[header], val)
+                    continue
+                safe_write(ws, curr_row, col_map[header], val)
 
     out_io = io.BytesIO()
     wb.save(out_io)

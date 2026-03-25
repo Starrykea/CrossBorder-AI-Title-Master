@@ -108,17 +108,21 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
             yield f"⚠️ 找不到标题列，跳过 {file_obj.name}"
             continue
 
+        # 初始化状态列
         if 'AI_Status' not in df.columns:
             df['AI_Status'] = "Pending"
 
-        # --- 递归轮次开始 ---
+        # --- 递归轮次开始 (最多3轮) ---
         for round_idx in range(1, 4):
-            # 1. 提取所有非 Optimized 的行
-            pending_df = df[df['AI_Status'] != 'Optimized'].copy()
+            # 提取所有未达标的行（Pending 或 上一轮失败的 Length_Exceeded）
+            pending_mask = df['AI_Status'] != 'Optimized'
+            pending_df = df[pending_mask].copy()
+
             if pending_df.empty:
+                yield f"✅ 所有标题已达标，提前结束优化。"
                 break
 
-            # 2. 全局去重映射：原始标题 -> [索引列表]
+            # 1. 全局去重映射：原始待优化标题 -> [索引列表]
             title_to_indices = {}
             for idx, row in pending_df.iterrows():
                 original_t = str(row[target_col])
@@ -127,42 +131,47 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
             unique_titles = list(title_to_indices.keys())
             total_unique = len(unique_titles)
 
-            yield f"🔄 [第 {round_idx} 轮] 唯一标题: {total_unique} 条 (关联原始数据: {len(pending_df)} 行)"
+            yield f"🔄 [第 {round_idx} 轮] 待处理唯一标题: {total_unique} 条"
 
-            # 3. 按 batch_size 分批处理唯一标题
+            # 2. 按批次处理唯一标题
             for i in range(0, total_unique, batch_size):
                 current_batch_titles = unique_titles[i: i + batch_size]
-                # 构造 ID:Title 字典用于发送
+                # 构造 ID:Title 字典进行发送
                 batch_payload = {idx: t for idx, t in enumerate(current_batch_titles)}
 
+                # 调用 AI 引擎
                 results, log_msg = ai_rewrite_engine(
                     batch_payload, char_limit, platform, language, key_pool, model_name, base_url,
                     is_retry=(round_idx > 1)
                 )
 
-                # 4. 结果分发回原始 DataFrame
-                for u_idx, (opt_text, status) in results.items():
-                    original_t = current_batch_titles[u_id] if (u_id := u_idx) < len(current_batch_titles) else None
+                # 3. 结果分发回原始 DataFrame
+                for batch_idx, (opt_text, status) in results.items():
+                    # 修正：状态判断，如果超长则标记为 Length_Exceeded
+                    final_status = "Optimized" if len(opt_text) <= char_limit else "Length_Exceeded"
+
+                    original_t = current_batch_titles[batch_idx] if batch_idx < len(current_batch_titles) else None
                     if original_t:
                         target_rows = title_to_indices[original_t]
                         for row_idx in target_rows:
                             df.at[row_idx, target_col] = opt_text
-                            df.at[row_idx, 'AI_Status'] = status
+                            df.at[row_idx, 'AI_Status'] = final_status
 
                 yield f"📝 [轮次{round_idx}] {log_msg} | 进度: {min(i + batch_size, total_unique)}/{total_unique}"
 
                 if i + batch_size < total_unique:
                     time.sleep(sleep_time)
 
-        # --- 最终保底：强制截断 ---
-        final_fail = df[df['AI_Status'] != 'Optimized'].index
-        if not final_fail.empty:
-            yield f"⚠️ 强制截断剩余 {len(final_fail)} 条超长标题以确保上架..."
-            df.loc[final_fail, target_col] = df.loc[final_fail, target_col].str[:char_limit]
-            df.loc[final_fail, 'AI_Status'] = 'Optimized'
-
+        # --- 移除强制截断逻辑 ---
+        # 统计最终结果
         final_stats = df['AI_Status'].value_counts()
-        yield f"📊 完成！成功: {final_stats.get('Optimized', 0)} 条。"
+        success = final_stats.get('Optimized', 0)
+        failed = final_stats.get('Length_Exceeded', 0)
+
+        if failed > 0:
+            yield f"⚠️ 注意：经过3轮优化，仍有 {failed} 条标题超长，已保留原样并标记为 'Length_Exceeded'。"
+
+        yield f"📊 文件 {file_obj.name} 处理完成！成功: {success}，失败: {failed}。"
         processed_results.append((file_obj.name, df))
 
     yield "FINISH_SIGNAL"

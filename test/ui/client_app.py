@@ -117,7 +117,7 @@ with tab_seo:
                 st.download_button(f"📥 下载 {f_name}", df_res.to_csv(index=False).encode('utf-8-sig'), f"Opt_{f_name}",
                                    key=f"dl_{idx}")
 
-# --- TAB 2: Listing (完整版：含 Mexico 命名、极致清洗、数据统计、UPC 计数器) ---
+# --- TAB 2: Listing (同步 Mexico 命名与逻辑定位) ---
 with tab_listing:
     st.title("📦 自动化填充 (JSON+UPC)")
 
@@ -138,29 +138,22 @@ with tab_listing:
         if src_file:
             src_df = pd.read_csv(src_file) if src_file.name.endswith('.csv') else pd.read_excel(src_file)
             data_count = len(src_df)
-
-            # --- 数据统计展示 ---
             st.info(f"📈 表格已加载：**{data_count}** 行数据")
 
             t_col = st.selectbox("选择标题列", src_df.columns)
             i_col = st.selectbox("选择图片列", src_df.columns)
 
             st.divider()
-            st.subheader("🔢 批量导入 UPC 码")
-            upc_raw = st.text_area("在此粘贴 UPC (一行一个)", height=150, placeholder="粘贴UPC列表...")
+            st.subheader("🔢 UPC 计数器")
+            upc_raw = st.text_area("在此粘贴 UPC (一行一个)", height=150)
             u_list = [u.strip() for u in upc_raw.split('\n') if u.strip()]
 
-            # --- UPC 计数器逻辑 ---
             if u_list:
                 upc_count = len(u_list)
                 if upc_count < data_count:
-                    st.warning(f"⚠️ UPC 数量不足！现有 **{upc_count}** 个，缺 **{data_count - upc_count}** 个")
-                elif upc_count == data_count:
-                    st.success(f"✅ UPC 数量完美匹配 (共 {upc_count} 个)")
+                    st.warning(f"⚠️ UPC 不足！缺 {data_count - upc_count} 个")
                 else:
-                    st.success(f"✅ UPC 充足 (共有 {upc_count} 个，多出 {upc_count - data_count} 个)")
-            else:
-                st.write("请粘贴 UPC 码以开始计数")
+                    st.success(f"✅ UPC 充足 (共 {upc_count} 个)")
 
     with c2:
         tpl_file = st.file_uploader("上传美克多模板", type=['xlsx'], key="l_tpl")
@@ -170,14 +163,27 @@ with tab_listing:
             target_sheet = st.selectbox("选择 Sheet", tpl_wb.sheetnames, index=len(tpl_wb.sheetnames) - 1)
             ws = tpl_wb[target_sheet]
 
-            # 1. 提取并重命名表头 (针对 Mexico 进行 full 命名)
-            ml_headers, h_counts, header_row_idx = [], {}, 1
-            for r in range(1, 11):
-                row_v = [str(ws.cell(row=r, column=c).value) for c in range(1, ws.max_column + 1)]
-                if any("Title" in (x or "") for x in row_v):
-                    for v in row_v:
-                        raw_n = str(v).strip()
-                        if raw_n == "Mexico":
+            ml_headers, h_counts, header_row_idx = [], {}, None
+            start_data_row = None
+            char_col_idx = 2  # 默认值
+
+            # --- 1. 扫描寻找表头并动态锁定字符计数列 ---
+            for r in range(1, 15):
+                row_v_str = [str(ws.cell(row=r, column=c).value or "").replace('\n', ' ').replace('\r', ' ').strip() for
+                             c in range(1, 100)]
+
+                if any("Title" in x for x in row_v_str):
+                    header_row_idx = r
+                    # 确定字符限制列索引
+                    for i, val in enumerate(row_v_str):
+                        if "Number of characters" in val:
+                            char_col_idx = i + 1
+                            break
+
+                    # 处理表头显示名称
+                    for v in row_v_str:
+                        n = v if v != "None" and v != "" else ""
+                        if n == "Mexico":
                             h_counts["Mexico"] = h_counts.get("Mexico", 0) + 1
                             if h_counts["Mexico"] == 1:
                                 final_name = "Mexico (full)"
@@ -186,70 +192,139 @@ with tab_listing:
                             else:
                                 final_name = f"Mexico_{h_counts['Mexico']}"
                         else:
-                            h_counts[raw_n] = h_counts.get(raw_n, 0) + 1
-                            final_name = f"{raw_n}_{h_counts[raw_n]}" if h_counts[raw_n] > 1 else raw_n
+                            h_counts[n] = h_counts.get(n, 0) + 1
+                            final_name = f"{n}_{h_counts[n]}" if h_counts[n] > 1 else n
                         ml_headers.append(final_name)
-                    header_row_idx = r;
-                    break
+                    break  # 找到表头后退出 r 循环
 
-            clean_h = [h for h in ml_headers if h and "None" not in h]
+            # --- 2. 核心逻辑：锁定第一个公式行 (缩进已对齐，在表头循环外) ---
+            if header_row_idx:
+                for r in range(header_row_idx + 1, 40):
+                    val_raw = ws.cell(row=r, column=char_col_idx).value
+                    val_str = str(val_raw or "").strip()
+
+                    # 只要发现公式，立即锁定为起始行并跳出
+                    if "=LEN" in val_str.upper():
+                        start_data_row = r
+                        break
+
+                # 如果全表没搜到公式，则走保底偏移
+                if not start_data_row:
+                    start_data_row = header_row_idx + 4
+
+            # 最终确认提示
+            st.success(f"📍 识别结果：字符限制在第 {char_col_idx} 列，起始行锁定为第 **{start_data_row}** 行")
 
 
-            # 极致清洗函数：排除 (full)、星号、换行、空格、English 关键字干扰
+            # --- 3. 属性过滤与匹配逻辑 ---
             def super_clean(text):
                 if not text: return ""
-                t = str(text).replace("(full)", "").replace("English", "")
-                return re.sub(r'\(.*?\)|[\*\n\r\s]', '', t).lower()
+                t = str(text).lower()
+                t = t.replace("(full)", "").replace("english", "")
+                t = re.sub(r'\(.*?\)', '', t)
+                t = re.sub(r'[^a-z0-9]', '', t)
+                return t
 
 
-            # 2. 自动勾选逻辑 (收紧规则，防止误选 Title)
-            auto_sel = []
-            for h in clean_h:
-                # --- 新增排除逻辑 ---
-                if "Mexico (full)" in h: continue  # 强制排除 Mexico (full)
-                if "Title:" in h and "inform product" in h: continue  # 排除长标题
-                # ------------------
-
-                ch = super_clean(h)
+            def should_show_header(h_name):
+                h_low = h_name.lower()
+                if "unit" in h_low and any(k in h_low for k in ["length", "width", "height", "package"]):
+                    return True
+                if "mexico" in h_low: return True
+                ch = super_clean(h_name)
                 for jk in preset_vals.keys():
                     cjk = super_clean(jk)
-                    if cjk == ch and len(cjk) > 0:
-                        auto_sel.append(h)
-                        break
-                    elif "description" in cjk and "description" in ch:
-                        auto_sel.append(h)
-                        break
+                    if cjk == ch or (len(cjk) > 3 and (cjk in ch or ch in cjk)):
+                        return True
+                if re.search(r'_\d+$', h_name): return False
+                garbage = ["select a value", "none", "english", "inform product"]
+                if any(g in h_low for g in garbage): return False
+                return True
 
+
+            clean_h = [h for h in ml_headers if h and h != "" and should_show_header(h)]
+
+            # 核心勾选逻辑
+            auto_sel = []
+            for h in clean_h:
+                if "Title:" in h and "inform product" in h: continue
+                if "(full)" in h.lower(): continue
+                h_low, ch = h.lower(), super_clean(h)
+                is_matched = False
+                if "unit" in h_low and any(k in h_low for k in ["length", "width", "height"]):
+                    if any("unit" in k.lower() for k in preset_vals.keys()):
+                        auto_sel.append(h);
+                        is_matched = True
+                if not is_matched:
+                    for jk in preset_vals.keys():
+                        if super_clean(jk) == ch:
+                            auto_sel.append(h);
+                            is_matched = True;
+                            break
+                    if not is_matched:
+                        for jk in preset_vals.keys():
+                            cjk = super_clean(jk)
+                            if (len(cjk) > 3 and (cjk in ch or ch in cjk)) or (
+                                    "description" in cjk and "description" in ch):
+                                auto_sel.append(h);
+                                break
+
+            auto_sel = list(dict.fromkeys(auto_sel))
             to_fill = st.multiselect("确认填充属性：", clean_h, default=auto_sel)
 
+            # 静态填充值界面
             static_data = {}
             for i, h in enumerate(to_fill):
-                ch = super_clean(h)
+                h_low, ch = h.lower(), super_clean(h)
                 matched_val = None
                 for jk, jv in preset_vals.items():
-                    cjk = super_clean(jk)
-                    if cjk == ch or ("description" in cjk and "description" in ch):
-                        matched_val = jv;
-                        break
+                    if super_clean(jk) == ch: matched_val = jv; break
+
+                if matched_val is None and "unit" in h_low:
+                    for jk, jv in preset_vals.items():
+                        jk_low = jk.lower()
+                        if "unit" in jk_low and any(
+                                k in h_low and k in jk_low for k in ["length", "width", "height", "package"]):
+                            matched_val = jv;
+                            break
+                    if matched_val is None:
+                        for jk, jv in preset_vals.items():
+                            if "unit" in jk.lower() and not str(jv).isdigit(): matched_val = jv; break
+
+                if matched_val is None:
+                    for jk, jv in preset_vals.items():
+                        cjk = super_clean(jk)
+                        if "unit" in h_low and "unit" not in jk.lower(): continue
+                        if (len(cjk) > 3 and (cjk in ch or ch in cjk)) or (
+                                "description" in cjk and "description" in ch):
+                            matched_val = jv;
+                            break
 
                 col_idx = ml_headers.index(h) + 1
                 opts = get_column_options(ws, tpl_wb, col_idx, header_row_idx)
                 val_str = str(matched_val) if matched_val is not None else ""
 
-                if opts:
+                if "description" in h_low or "description" in ch:
+                    static_data[h] = st.text_area(f"[{h}]", value=val_str, key=f"t_{i}", height=180)
+                elif opts:
                     try:
                         d_idx = opts.index(val_str)
                         static_data[h] = st.selectbox(f"[{h}]", opts, index=d_idx, key=f"s_{i}")
-                    except ValueError:
-                        static_data[h] = st.text_input(f"[{h}] (手动填入)", value=val_str, key=f"s_in_{i}")
+                    except:
+                        static_data[h] = st.text_input(f"[{h}]", value=val_str, key=f"s_in_{i}")
                 else:
-                    if "description" in h.lower() or "description" in ch:
-                        static_data[h] = st.text_area(f"[{h}]", value=val_str, key=f"t_{i}", height=180)
-                    else:
-                        static_data[h] = st.text_input(f"[{h}]", value=val_str, key=f"t_{i}")
+                    static_data[h] = st.text_input(f"[{h}]", value=val_str, key=f"t_{i}")
 
+            # --- 4. 生成按钮 ---
             if st.button("🚀 开始生成上架表", type="primary", use_container_width=True):
-                res = process_mercado_listing(src_df, tpl_bytes, target_sheet,
-                                              {'title_col': t_col, 'img_col': i_col}, static_data, u_list)
-                st.success(f"✅ 生成成功！已处理 {len(src_df)} 条数据。")
-                st.download_button("📥 立即下载生成的表格", res, f"ML_Ready.xlsx", use_container_width=True)
+                res = process_mercado_listing(
+                    source_df=src_df,
+                    template_bytes=tpl_bytes,
+                    sheet_name=target_sheet,
+                    mapping_config={'title_col': t_col, 'img_col': i_col},
+                    static_fills=static_data,
+                    upc_list=u_list,
+                    start_row=start_data_row
+                )
+                st.success(f"✅ 生成成功！")
+                st.download_button("📥 下载结果", res, f"Ready.xlsx", use_container_width=True)
