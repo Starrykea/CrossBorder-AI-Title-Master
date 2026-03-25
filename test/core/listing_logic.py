@@ -85,48 +85,33 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
     header_row_idx = 1
     headers = []
     h_counts = {}
-
-    # 初始默认值，稍后会通过循环动态修正
     char_count_col_idx = 2
 
-    # 扫描前 15 行寻找表头
     for i in range(1, 15):
         row_vals_raw = []
         for j in range(1, 100):
             val = ws.cell(row=i, column=j).value
-            # 这里的清理逻辑必须和 UI 端完全一致：粉碎换行符
             val_clean = str(val or "").replace('\n', ' ').replace('\r', ' ').strip()
             row_vals_raw.append(val_clean)
 
-        # 只要这一行包含 "Title"，就认定为表头行
         if any("Title" in v for v in row_vals_raw):
             header_row_idx = i
-
-            # --- 关键修正：动态锁定 Number of characters 所在的列 ---
             for idx, n in enumerate(row_vals_raw):
-                # 寻找字符计数列的位置
                 if "Number of characters" in n:
-                    char_count_col_idx = idx + 1  # 索引从1开始
+                    char_count_col_idx = idx + 1
 
-                # 处理 Mexico 等重名列的计数逻辑 (保持你原有的逻辑)
                 if n == "Mexico":
                     h_counts["Mexico"] = h_counts.get("Mexico", 0) + 1
-                    if h_counts["Mexico"] == 1:
-                        final_name = "Mexico (full)"
-                    elif h_counts["Mexico"] == 2:
-                        final_name = "Mexico"
-                    else:
-                        final_name = f"Mexico_{h_counts['Mexico']}"
+                    final_name = "Mexico (full)" if h_counts["Mexico"] == 1 else (
+                        "Mexico" if h_counts["Mexico"] == 2 else f"Mexico_{h_counts['Mexico']}")
                 elif n == "" or n == "None":
                     final_name = ""
                 else:
                     h_counts[n] = h_counts.get(n, 0) + 1
                     final_name = f"{n}_{h_counts[n]}" if h_counts[n] > 1 else n
-
                 headers.append(final_name)
             break
 
-    # 建立【列名】到【列索引】的映射
     col_map = {name: idx + 1 for idx, name in enumerate(headers) if name != ''}
 
     # --- 2. 核心逻辑：寻找第一个公式行作为 start_row ---
@@ -134,25 +119,32 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
         for r in range(header_row_idx + 1, 40):
             cell_val = ws.cell(row=r, column=char_count_col_idx).value
             val_str = str(cell_val or "").strip()
-
-            # 找到第一个公式，立即锁定
             if "=LEN" in val_str.upper():
                 start_row = r
                 break
-
-        # 保底逻辑
         if not start_row:
             start_row = header_row_idx + 4
-    # 3. 识别功能列名（用于后续填充）
+
+    # 3. 识别特殊功能列名
     ml_upc_key = next((k for k in col_map.keys() if "Universal product code" in k), None)
     color_key = next((k for k in col_map.keys() if "Color" in k), None)
     sku_key = next((k for k in col_map.keys() if "SKU" in k), None)
+
+    # --- 颜色递增预准备 ---
+    color_start_val = static_fills.get(color_key, "")
+    color_prefix = ""
+    color_num = None
+    # 匹配 A100 这种格式：(字母部分)(数字部分)
+    color_match = re.match(r"([a-zA-Z]+)([0-9]+)", str(color_start_val))
+    if color_match:
+        color_prefix = color_match.group(1)
+        color_num = int(color_match.group(2))
 
     # 4. 执行数据填充
     for i, (_, row_data) in enumerate(source_df.iterrows()):
         curr_row = start_row + i
 
-        # 标题和图片写入
+        # 标题和图片
         real_title_key = next((k for k in col_map.keys() if "Title" in k and "Number" not in k), None)
         if real_title_key:
             safe_write(ws, curr_row, col_map[real_title_key], row_data[mapping_config['title_col']])
@@ -169,13 +161,21 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
         if ml_upc_key and upc_list and i < len(upc_list):
             safe_write(ws, curr_row, col_map[ml_upc_key], upc_list[i])
 
-        # 静态字段填充 (Brand, Condition, Package 等)
+        # 5. 字段填充 (包含颜色递增逻辑)
         for header, val in static_fills.items():
             if header in col_map:
-                # 颜色列跳过，如果需要随机颜色逻辑可在此添加
+                # --- 如果是颜色列，执行递增 ---
                 if header == color_key:
-                    continue
-                safe_write(ws, curr_row, col_map[header], val)
+                    if color_num is not None:
+                        # 每一行自动 +i (例如 A100, A101...)
+                        final_color = f"{color_prefix}{color_num + i}"
+                    else:
+                        final_color = val  # 如果不是 A100 格式，填固定值
+                    safe_write(ws, curr_row, col_map[header], final_color)
+
+                # --- 其他普通静态字段 ---
+                else:
+                    safe_write(ws, curr_row, col_map[header], val)
 
     out_io = io.BytesIO()
     wb.save(out_io)
