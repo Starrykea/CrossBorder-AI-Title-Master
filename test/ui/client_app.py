@@ -154,42 +154,74 @@ with tab_listing:
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
-        src_file = st.file_uploader("上传结果表", type=['xlsx', 'csv'], key="l_src")
+        src_file = st.file_uploader("上传结果表", type=['xlsx', 'csv', 'xls'], key="l_src")
         data_count = 0
         if src_file:
             try:
-                if src_file.name.endswith('.csv'):
+                # 1. 尝试读取逻辑
+                src_file.seek(0)
+                file_name = src_file.name.lower()
+                src_df = None
+
+                # 情况 A: 后缀是 .xlsx (但可能是伪装的 CSV)
+                if file_name.endswith('.xlsx'):
+                    try:
+                        # 先按标准 Excel 读取
+                        src_df = pd.read_excel(src_file, engine='openpyxl')
+                    except Exception:
+                        # 如果报错，说明可能是“手动改后缀”的 CSV，重置指针尝试 CSV 读取
+                        src_file.seek(0)
+                        try:
+                            src_df = pd.read_csv(src_file, encoding='utf-8-sig')
+                        except UnicodeDecodeError:
+                            src_file.seek(0)
+                            src_df = pd.read_csv(src_file, encoding='gbk')
+
+                # 情况 B: 后缀是 .csv
+                elif file_name.endswith('.csv'):
                     try:
                         src_df = pd.read_csv(src_file, encoding='utf-8-sig')
                     except UnicodeDecodeError:
                         src_file.seek(0)
                         src_df = pd.read_csv(src_file, encoding='gbk')
+
+                # 情况 C: 后缀是 .xls
+                elif file_name.endswith('.xls'):
+                    try:
+                        src_df = pd.read_excel(src_file, engine='xlrd')
+                    except:
+                        src_file.seek(0)
+                        src_df = pd.read_html(src_file)[0]
+
+                # 2. 校验结果并渲染 UI
+                if src_df is not None and not src_df.empty:
+                    # 💡 自动清理列名中的前后空格（防止匹配失败）
+                    src_df.columns = [str(c).strip() for c in src_df.columns]
+
+                    data_count = len(src_df)
+                    st.info(f"📈 表格已加载：**{data_count}** 行数据")
+
+                    t_col = st.selectbox("选择标题列", src_df.columns, key="sel_t_col_v3")
+                    i_col = st.selectbox("选择图片列", src_df.columns, key="sel_i_col_v3")
+                    s_col = st.selectbox("选择商品ID列 (用于生成SKU)", src_df.columns, key="sel_s_col_v3")
+
+                    st.divider()
+                    st.subheader("🔢 UPC 计数器")
+                    upc_raw = st.text_area("在此粘贴 UPC (一行一个)", height=150, key="upc_area_v3")
+                    u_list = [u.strip() for u in upc_raw.split('\n') if u.strip()]
+
+                    if u_list:
+                        upc_count = len(u_list)
+                        if upc_count < data_count:
+                            st.warning(f"⚠️ UPC 不足！还差 {data_count - upc_count} 个")
+                        else:
+                            st.success(f"✅ UPC 充足 (共 {upc_count} 个)")
                 else:
-                    src_df = pd.read_excel(src_file)
-
-                data_count = len(src_df)
-                st.info(f"📈 表格已加载：**{data_count}** 行数据")
-
-                t_col = st.selectbox("选择标题列", src_df.columns)
-                i_col = st.selectbox("选择图片列", src_df.columns)
-                s_col = st.selectbox("选择商品ID列 (用于生成SKU)", src_df.columns)
-
-                st.divider()
-                st.subheader("🔢 UPC 计数器")
-                upc_raw = st.text_area("在此粘贴 UPC (一行一个)", height=150)
-                u_list = [u.strip() for u in upc_raw.split('\n') if u.strip()]
-
-                if u_list:
-                    upc_count = len(u_list)
-                    if upc_count < data_count:
-                        st.warning(f"⚠️ UPC 不足！还差 {data_count - upc_count} 个")
-                    else:
-                        st.success(f"✅ UPC 充足 (共 {upc_count} 个)")
+                    st.error("❌ 读取到的表格数据为空，请检查文件内容。")
 
             except Exception as e:
-                st.error(f"❌ 文件读取失败: {str(e)}")
+                st.error(f"❌ 文件解析失败: {str(e)}")
                 st.stop()
-
     with c2:
         tpl_file = st.file_uploader("上传美克多模板", type=['xlsx'], key="l_tpl")
 

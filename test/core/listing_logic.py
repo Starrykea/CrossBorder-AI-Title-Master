@@ -85,17 +85,27 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
     wb = openpyxl.load_workbook(in_io)
     ws = wb[sheet_name]
 
-    # 1. 寻找表头逻辑
+    # --- 1. 寻找表头逻辑 (后端：必须与 UI 逻辑完全同步) ---
     header_row_idx = 1
     headers = []
     h_counts = {}
-    for i in range(1, 15):
-        row_vals_raw = [str(ws.cell(row=i, column=j).value or "").replace('\n', ' ').strip() for j in range(1, 100)]
+
+    for i in range(1, 25):
+        row_vals_raw = [str(ws.cell(row=i, column=j).value or "").strip() for j in range(1, 100)]
         if any("Title" in v for v in row_vals_raw):
             header_row_idx = i
-            for n in row_vals_raw:
-                if n == "":
+            for v in row_vals_raw:
+                n = v.replace('\n', ' ').strip()
+                if n == "" or n == "None":
                     headers.append("")
+                elif n == "Mexico":
+                    h_counts["Mexico"] = h_counts.get("Mexico", 0) + 1
+                    # 这里必须和 UI 保持一致：1号是 full，2号是原名
+                    if h_counts["Mexico"] == 1:
+                        final_name = "Mexico (full)"
+                    else:
+                        final_name = "Mexico"
+                    headers.append(final_name)
                 else:
                     h_counts[n] = h_counts.get(n, 0) + 1
                     headers.append(f"{n}_{h_counts[n]}" if h_counts[n] > 1 else n)
@@ -103,76 +113,73 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
 
     col_map = {name: idx + 1 for idx, name in enumerate(headers) if name != ''}
 
-    # 锁定起始行
+    # 锁定数据起始行
     char_count_col_idx = 2
     if start_row is None:
-        for r in range(header_row_idx + 1, 40):
+        for r in range(header_row_idx + 1, 60):
             val_str = str(ws.cell(row=r, column=char_count_col_idx).value or "").strip()
             if "=LEN" in val_str.upper():
                 start_row = r
                 break
         if not start_row: start_row = header_row_idx + 4
 
-    # 预准备逻辑 (颜色递增、UPC等)
+    # 功能列识别
     ml_upc_key = next((k for k in col_map.keys() if "Universal product code" in k), None)
     sku_key = next((k for k in col_map.keys() if "SKU" in k), None)
-    all_color_keys = [k for k in col_map.keys() if "color" in k.lower()]
+    all_color_keys = [k for k in col_map.keys() if "Color" in k]  # 匹配模板里的 Color_1
 
+    # 颜色递增准备
     color_start_val = ""
     for ck in all_color_keys:
-        if ck in static_fills:
-            color_start_val = static_fills[ck]
-            break
+        if ck in static_fills: color_start_val = static_fills[ck]; break
     color_match = re.match(r"([a-zA-Z]+)([0-9]+)", str(color_start_val))
     color_prefix, color_num = (color_match.group(1), int(color_match.group(2))) if color_match else ("", None)
 
-    # 2. 核心填充循环 (仅处理 Excel 写入)
+    # --- 2. 核心填充循环 ---
     for i, (_, row_data) in enumerate(source_df.iterrows()):
         curr_row = start_row + i
 
-        # A. 填充基础字段 (Excel 写入)
+        # A. 基础字段
+        # 标题处理 + 60字符自动截断
         real_title_key = next((k for k in col_map.keys() if "Title" in k and "Number" not in k), None)
         if real_title_key:
-            v = row_data[mapping_config['title_col']]
-            safe_write(ws, curr_row, col_map[real_title_key], v)
+            title_v = str(row_data[mapping_config['title_col']])
+            if len(title_v) > 60:
+                title_v = title_v.replace("Comfortable", "Comfort").replace("Artwork", "Art").replace("Car ", "")
+                title_v = title_v[:60].strip()
+            safe_write(ws, curr_row, col_map[real_title_key], title_v)
 
+        # 图片、SKU、UPC
         photo_key = next((k for k in col_map.keys() if "Photos" in k), None)
-        if photo_key:
-            v = row_data[mapping_config['img_col']]
-            safe_write(ws, curr_row, col_map[photo_key], v)
+        if photo_key: safe_write(ws, curr_row, col_map[photo_key], row_data[mapping_config['img_col']])
 
         if sku_key and mapping_config.get('sku_col'):
-            original_id = str(row_data[mapping_config['sku_col']]).strip()
-            final_sku = f"{original_id}-M{i + 1}"
-            safe_write(ws, curr_row, col_map[sku_key], final_sku)
+            sku_v = f"{str(row_data[mapping_config['sku_col']]).strip()}-M{i + 1}"
+            safe_write(ws, curr_row, col_map[sku_key], sku_v)
 
         if ml_upc_key and upc_list and i < len(upc_list):
             safe_write(ws, curr_row, col_map[ml_upc_key], upc_list[i])
 
-        # B. 填充静态配置字段
-        for header, val in static_fills.items():
-            if header in col_map:
-                h_low = header.lower()
-
-                # --- 【核心拦截逻辑】：Package 隔离 ---
-                if "package" not in h_low and "package" in str(header).lower():
-                    if any(core in h_low for core in ["weight", "length", "width", "height"]):
-                        continue
-
+        # B. 静态配置字段填充
+        for header_key, val in static_fills.items():
+            # 💡 这里是关键：UI 传过来的 Mexico 如果对应 JSON 里的 Mexico_2，
+            # 那么 header_key 必须精准匹配 col_map 里的 Mexico_2
+            if header_key in col_map:
+                target_col = col_map[header_key]
+                h_low = header_key.lower()
                 final_val = val
+
                 # 颜色递增
-                if header in all_color_keys and color_num is not None:
+                if header_key in all_color_keys and color_num is not None:
                     final_val = f"{color_prefix}{color_num + i}"
-                # 描述清理
-                elif any(k.lower() in h_low for k in ["description", "summary"]):
+                # 描述清洗
+                elif "description" in h_low:
                     clean_v = re.sub(r'</p>|<br\s*/?>', '\n', str(val))
                     clean_v = re.sub(r'<[^>]+>', '', clean_v)
                     final_val = re.sub(r'\n\s*\n', '\n', clean_v).strip()
 
-                # 执行 Excel 写入
-                safe_write(ws, curr_row, col_map[header], final_val)
+                safe_write(ws, curr_row, target_col, final_val)
 
     out_io = io.BytesIO()
     wb.save(out_io)
-    # 返回 Excel 字节流和空字符串 (JSON 由 UI 层直接生成)
     return out_io.getvalue(), ""
