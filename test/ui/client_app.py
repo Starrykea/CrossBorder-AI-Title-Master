@@ -193,7 +193,7 @@ with tab_listing:
     with c2:
         tpl_file = st.file_uploader("上传美克多模板", type=['xlsx'], key="l_tpl")
 
-        # --- 持久化状态初始化 ---
+        # --- 状态初始化 (用于持久化) ---
         if "gen_xlsx" not in st.session_state:
             st.session_state.gen_xlsx = None
         if "gen_json" not in st.session_state:
@@ -207,7 +207,7 @@ with tab_listing:
             target_sheet = st.selectbox("选择 Sheet", tpl_wb.sheetnames, index=len(tpl_wb.sheetnames) - 1)
             ws = tpl_wb[target_sheet]
 
-            # 1. 完全保留你的原表头识别逻辑
+            # --- 1. 核心识别逻辑 (原封不动) ---
             ml_headers, h_counts, header_row_idx = [], {}, None
             start_data_row = None
             char_col_idx = 2
@@ -250,11 +250,11 @@ with tab_listing:
             st.success(f"📍 识别结果：字符限制在第 {char_col_idx} 列，起始行锁定为第 **{start_data_row}** 行")
 
 
-            # 2. 完全保留你的属性匹配逻辑
+            # --- 2. 过滤与匹配算法 (已修正 English 逻辑) ---
             def super_clean(text):
                 if not text: return ""
                 t = str(text).lower()
-                t = t.replace("(full)", "").replace("english", "")
+                t = t.replace("(full)", "")  # 不再删掉 english
                 t = re.sub(r'\(.*?\)', '', t)
                 t = re.sub(r'[^a-z0-9]', '', t)
                 return t
@@ -266,7 +266,8 @@ with tab_listing:
                 core_units = ["length", "width", "height", "package", "weight", "depth", "volume"]
                 if "unit" in h_low and any(k in h_low for k in core_units):
                     return True
-                if "mexico" in h_low: return True
+                if "mexico" in h_low or "description" in h_low:  # 显式放行
+                    return True
                 for jk in preset_vals.keys():
                     cjk = super_clean(jk)
                     if cjk == ch: return True
@@ -276,14 +277,15 @@ with tab_listing:
                                 continue
                         return True
                 if re.search(r'_\d+$', h_name): return False
-                garbage = ["select a value", "none", "english", "inform product"]
+                # 垃圾词过滤不再包含 english
+                garbage = ["select a value", "none", "inform product"]
                 if any(g in h_low for g in garbage): return False
                 return True
 
 
             clean_h = [h for h in ml_headers if h and h != "" and should_show_header(h)]
 
-            # 3. 完全保留你的自动勾选逻辑
+            # --- 3. 自动勾选逻辑 (原封不动) ---
             auto_sel = []
             for h in clean_h:
                 if "Title:" in h and "inform product" in h: continue
@@ -320,11 +322,12 @@ with tab_listing:
             auto_sel = list(dict.fromkeys(auto_sel))
             to_fill = st.multiselect("确认填充属性：", clean_h, default=auto_sel)
 
-            # 4. 完全保留你的静态值匹配逻辑
+            # --- 4. 静态填充渲染 (修复：使用属性名作为唯一 Key) ---
             static_data = {}
             for i, h in enumerate(to_fill):
                 h_low, ch = h.lower(), super_clean(h)
                 matched_val = None
+
                 for jk, jv in preset_vals.items():
                     if super_clean(jk) == ch: matched_val = jv; break
                 if matched_val is None and "unit" in h_low:
@@ -352,28 +355,27 @@ with tab_listing:
                 opts = get_column_options(ws, tpl_wb, col_idx, header_row_idx)
                 val_str = str(matched_val) if matched_val is not None else ""
 
-                safe_key = f"input_{h}"  # 属性名是唯一的，不会因为删除其他行而变动
-
+                # --- 使用属性名 h 作为唯一 Key，防止删除行时数据覆盖 ---
                 if "description" in h_low or "description" in ch:
-                    static_data[h] = st.text_area(f"[{h}]", value=val_str, key=f"area_{safe_key}", height=180)
+                    static_data[h] = st.text_area(f"[{h}]", value=val_str, key=f"area_{h}", height=180)
                 elif opts:
                     try:
                         d_idx = opts.index(val_str)
-                        static_data[h] = st.selectbox(f"[{h}]", opts, index=d_idx, key=f"select_{safe_key}")
+                        static_data[h] = st.selectbox(f"[{h}]", opts, index=d_idx, key=f"sel_{h}")
                     except:
-                        static_data[h] = st.text_input(f"[{h}]", value=val_str, key=f"input_manual_{safe_key}")
+                        static_data[h] = st.text_input(f"[{h}]", value=val_str, key=f"in_m_{h}")
                 else:
-                    static_data[h] = st.text_input(f"[{h}]", value=val_str, key=f"text_{safe_key}")
-            # --- 5. 功能按钮区 (生成 & 清除) ---
+                    static_data[h] = st.text_input(f"[{h}]", value=val_str, key=f"txt_{h}")
+
+            # --- 5. 生成与清除按钮区域 ---
             st.divider()
-            b1, b2 = st.columns(2)
-            with b1:
-                if st.button("🚀 开始生成上架表", type="primary", use_container_width=True, key="btn_run"):
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                if st.button("🚀 开始生成上架表", type="primary", use_container_width=True, key="main_run_btn"):
                     if not static_data:
-                        st.warning("⚠️ 没选属性！")
+                        st.warning("⚠️ 请选择属性")
                     else:
                         with st.spinner("生成中..."):
-                            # 调用 Logic 生成 Excel
                             res_xlsx, _ = process_mercado_listing(
                                 source_df=src_df,
                                 template_bytes=tpl_bytes,
@@ -383,31 +385,30 @@ with tab_listing:
                                 upc_list=u_list,
                                 start_row=start_data_row
                             )
-                            # 生成 JSON
-                            clean_json_dict = {re.sub(r'_\d+$', '', k): v for k, v in static_data.items()}
+                            # 生成干净的 JSON（保留星号/括号，去索引）
+                            clean_json = {re.sub(r'_\d+$', '', k): v for k, v in static_data.items()}
 
-                            # 存入缓存
                             st.session_state.gen_xlsx = res_xlsx
-                            st.session_state.gen_json = json.dumps(clean_json_dict, ensure_ascii=False, indent=4)
+                            st.session_state.gen_json = json.dumps(clean_json, ensure_ascii=False, indent=4)
                             st.session_state.gen_success = True
 
-            with b2:
-                if st.button("🗑️ 清除生成结果", use_container_width=True, key="btn_clear"):
+            with col_b2:
+                if st.button("🗑️ 清除生成结果", use_container_width=True, key="clear_state_btn"):
                     st.session_state.gen_xlsx = None
                     st.session_state.gen_json = None
                     st.session_state.gen_success = False
                     st.rerun()
 
-            # --- 6. 结果持久化展示 ---
+            # --- 6. 结果下载区域 ---
             if st.session_state.gen_success and st.session_state.gen_xlsx:
-                st.success("✅ 文件已就绪")
-                dl1, dl2 = st.columns(2)
+                st.success("✅ 文件已锁定，可多次下载。")
+                d1, d2 = st.columns(2)
                 import time
 
                 ts = int(time.time())
-                with dl1:
+                with d1:
                     st.download_button("📥 下载 Excel", data=st.session_state.gen_xlsx, file_name=f"Ready_{ts}.xlsx",
-                                       key="dl_x")
-                with dl2:
+                                       key="dl_x_final")
+                with d2:
                     st.download_button("📄 下载 JSON", data=st.session_state.gen_json, file_name=f"Config_{ts}.json",
-                                       key="dl_j")
+                                       key="dl_j_final")
