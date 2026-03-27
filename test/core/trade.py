@@ -27,12 +27,19 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
 
     # 构造 Prompt
     prompt = (
-        f"你是{platform}专家。优化以下标题，语言：{language}：\n"
-        f"{retry_warning}\n"
-        f"1. **硬指标**：包含空格在内的最终结果绝对不能超过 {char_limit} 个字符。\n"
-        f"2. **分类规则**：仅‘手机/平板配件(Case/Cover)’开头加'for '；汽车/家居等品类严禁加'for'。\n"
-        f"3. **格式要求**：严禁使用逗号，严禁单词只写一半，必须是通顺短语。\n"
-        f"4. **精简逻辑**：若超长，优先删除介词(With/From)、属性词(Polyester/Black)，保留2pc以上的数量属性，1pc数量词删除。\n"
+        f"你是{platform}专家。优化以下标题，语言：{language}。要求如下：\n"
+        f"1. **硬指标**：包含空格在内必须 < {char_limit} 字符。**严禁使用任何逗号或分号**，省略1pc，保留2pc以上套装属性\n"
+        f"2. **保留区分度**：必须保留颜色(Color)、材质(Material)、或图案(Pattern)等关键属性，这是区分SKU的核心。\n"
+        f"3. **极限多样化要求**：\n"
+        f"   - **禁止雷同**：这一组标题严禁使用相同的开头和句式结构。\n"
+        f"   - **同义词旋转**：随机交替使用 (2pcs, 1 Pair, 2-Pack, Set of 2) 以及 (Oven Mitts, Baking Gloves, Kitchen Mittens)。\n"
+        f"   - **结构打乱**：随机切换以下四种重心，确保组内标题排布各不相同：\n"
+        f"     * 重心A (属性优先): [图案/颜色] + [核心词] + [功能/数量]\n"
+        f"     * 重心B (功能优先): [功能短语] + [核心词] + [数量/属性]\n"
+        f"     * 重心C (场景优先): [核心词] + [数量] + [场景用语] + [属性]\n"
+        f"     * 重心D (数量优先): [数量词变体] + [属性] + [核心词] + [功能]\n"
+        f"4. **精简逻辑**：若超长，删除多余修饰词(High Quality, Durable, 2026 New)，但严禁删除颜色词。\n"
+        f"5. **分类规则**：仅‘手机/平板配件’开头加'for '，其他严禁。\n"
         f"格式：'#ID: 结果'。\n"
         f"待处理：\n{input_payload}"
     )
