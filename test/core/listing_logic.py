@@ -126,8 +126,7 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
     # 功能列识别
     ml_upc_key = next((k for k in col_map.keys() if "Universal product code" in k), None)
     sku_key = next((k for k in col_map.keys() if "SKU" in k), None)
-    all_color_keys = [k for k in col_map.keys() if "Color" in k]  # 匹配模板里的 Color_1
-
+    all_color_keys = [k for k in col_map.keys() if "color" in k.lower()]
     # 颜色递增准备
     color_start_val = ""
     for ck in all_color_keys:
