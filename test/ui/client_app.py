@@ -7,16 +7,18 @@ import time
 import io
 import openpyxl
 import json
+
+# 设置路径
 root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_path not in sys.path:
     sys.path.insert(0, root_path)
+
 try:
-    # 此时 Python 就能在根目录下找到 core 文件夹了
     from core.trade import start_optimization_task, VERSION
     from core.listing_logic import process_mercado_listing, get_column_options
 except ImportError as e:
     st.error(f"核心模块导入失败: {e}")
-    st.info(f"当前搜索路径: {sys.path[0]}") # 方便你在云端调试路径
+    st.info(f"当前搜索路径: {sys.path[0]}")
     st.stop()
 
 st.set_page_config(page_title=f"跨境AI大师 {VERSION}", layout="wide", page_icon="🚀")
@@ -37,18 +39,16 @@ if not st.session_state.authenticated:
             st.rerun()
     st.stop()
 
-# ================= 侧边栏 (已添加去重开关) =================
+# ================= 侧边栏 =================
 with st.sidebar:
     st.header("⚙️ 引擎配置")
     engine_type = st.selectbox("AI 引擎", ["Google Gemini", "DeepSeek"])
 
-    # 默认 URL 处理
     default_url = "https://generativelanguage.googleapis.com/v1beta/openai/" if engine_type == "Google Gemini" else "https://api.deepseek.com"
     base_url = st.text_input("API URL", value=default_url)
 
-    # 模型切换
     if engine_type == "Google Gemini":
-        gemini_opts = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro","gemini-2.0-flash"]
+        gemini_opts = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
         sel_m = st.selectbox("模型切换", gemini_opts, index=0)
         model_name = st.text_input("当前模型名称", value=sel_m)
     else:
@@ -59,36 +59,57 @@ with st.sidebar:
 
     st.divider()
 
-    # --- 核心优化逻辑开关 ---
+    # --- 任务逻辑控制 ---
     st.subheader("🛠️ 任务逻辑控制")
-    # 【新增开关】：全局去重开关
-    use_deduplicate = st.checkbox("开启全局去重", value=True,
-                                  help="开启：相同原始标题只消耗一次Token；关闭：每行独立优化，配合高Temperature可生成不同标题。")
-    # 【新增】：AI 创造力滑块
-    # 0.0 是最严谨，1.0 是正常，1.5 以上就开始起飞了
+
+    # 1. 全局去重开关
+    use_deduplicate = st.checkbox(
+        "开启全局去重",
+        value=True,
+        help="开启：相同标题会被归类；关闭：每行独立优化。"
+    )
+
+    # 【新增】：分组去重上限设置
+    # 只有在开启去重时才显示这个设置
+    deduplicate_limit = 999999  # 默认一个极大值
+    if use_deduplicate:
+        deduplicate_limit = st.number_input(
+            "分组去重上限 (Threshold)",
+            min_value=1,
+            max_value=999,
+            value=99,
+            help="每隔多少个重复标题强制生成一个新的AI变体。例如设为99，则前99个重复标题用同一个优化结果，第100个会重新生成。"
+        )
+
+    # 2. AI 创造力滑块
     user_temperature = st.slider(
         "🎨 AI 创造力 (Temperature)",
         min_value=0.0,
         max_value=1.5,
         value=0.7,
         step=0.1,
-        help="0.0 最稳定；值越高，生成的标题差异越大，但太高可能会乱说话。"
+        help="0.0 最稳定；值越高，生成的标题差异越大。"
     )
-    # --- 优化参数 ---
+
+    # 3. 优化参数
     char_limit = st.slider("标题字符上限", 10, 200, 60)
     sleep_time = st.slider("🔥 间隔休眠时间 (秒)", 0.0, 50.0, 10.0, step=0.5)
 
     target_platform = st.selectbox("目标平台", ["Mercado Libre", "Amazon", "Shopee"])
     target_lang = st.selectbox("目标语言", ["英语", "西班牙语", "葡萄牙语", "中文"])
 
-    # 批量处理个数
     batch_size = st.number_input("📦 每批次处理个数", min_value=1, max_value=100, value=50)
 
-    st.info(f"💡 当前模式：{'🚀 高效去重模式' if use_deduplicate else '🎨 多样化铺货模式'}")
+    # 底部状态展示优化
+    if use_deduplicate:
+        st.info(f"💡 当前模式：🚀 分组去重 (每 {deduplicate_limit} 条切片)")
+    else:
+        st.info(f"💡 当前模式：🎨 逐行独立重写")
+
 # ================= 主界面 =================
 tab_seo, tab_listing = st.tabs(["🔥 标题批量优化轮", "📦 美克多列表自动上架"])
 
-# --- TAB 1: 标题优化 (日志 & 清除 & 任务逻辑) ---
+# --- TAB 1: 标题优化 ---
 with tab_seo:
     st.title("🚀 AI 标题优化引擎")
 
@@ -102,17 +123,28 @@ with tab_seo:
     uploaded_files = st.file_uploader("上传待处理文件", type=['xlsx', 'csv'], accept_multiple_files=True)
 
     if uploaded_files and not st.session_state.optimization_done:
-        if st.button("🔥 启动多轮优化", type="primary", use_container_width=True):
+        if st.button("🔥 启动多轮优化任务", type="primary", use_container_width=True):
             if not user_keys:
                 st.error("❌ 请先配置 API Key")
             else:
                 st.session_state.process_logs = []
                 with st.status("🚀 AI 正在努力工作中...", expanded=True) as status:
                     log_area = st.empty()
-                    # 传入 sleep_time 给后端任务
+
+                    # 关键点：将 deduplicate_limit 传给后端函数
                     task_gen = start_optimization_task(
-                        uploaded_files, target_platform, char_limit,
-                        target_lang, user_keys, batch_size, sleep_time, model_name, base_url,use_deduplicate=use_deduplicate,temperature=user_temperature  # <--- 把滑块的值传进去
+                        uploaded_files=uploaded_files,
+                        platform=target_platform,
+                        char_limit=char_limit,
+                        language=target_lang,
+                        api_keys=user_keys,
+                        batch_size=batch_size,
+                        sleep_time=sleep_time,
+                        model_name=model_name,
+                        base_url=base_url,
+                        use_deduplicate=use_deduplicate,
+                        deduplicate_limit=deduplicate_limit,  # <--- 新增参数传递
+                        temperature=user_temperature
                     )
 
                     for msg in task_gen:
@@ -126,18 +158,23 @@ with tab_seo:
                             log_area.code("\n".join(st.session_state.process_logs[-15:]), language="bash")
                 st.rerun()
 
-    # 显示结果和持久化日志
     if st.session_state.optimization_done:
-        st.subheader("✅ 优化结果清单")
+        st.subheader("✅ 优化结果清单预览")
         with st.expander("查看完整处理日志"):
             st.code("\n".join(st.session_state.process_logs), language="bash")
 
         d_cols = st.columns(3)
         for idx, (f_name, df_res) in enumerate(st.session_state.final_results):
             with d_cols[idx % 3]:
-                st.download_button(f"📥 下载 {f_name}", df_res.to_csv(index=False).encode('utf-8-sig'), f"Opt_{f_name}",
-                                   key=f"dl_{idx}")
-
+                # 编码选择 utf-8-sig 兼容 Excel 打开不乱码
+                csv_data = df_res.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    label=f"📥 下载 {f_name}",
+                    data=csv_data,
+                    file_name=f"Opt_{f_name}",
+                    key=f"dl_{idx}",
+                    use_container_width=True
+                )
 # --- TAB 2: Listing (同步 Mexico 命名与逻辑定位) ---
 with tab_listing:
     st.title("📦 自动化填充 (JSON+UPC)")
