@@ -113,7 +113,7 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
         if not target_col:
             yield f"⚠️ 找不到标题列，跳过 {file_obj.name}"
             continue
-
+        df[target_col] = df[target_col].astype(str).replace('nan', '')
         if 'AI_Status' not in df.columns:
             df['AI_Status'] = "Pending"
 

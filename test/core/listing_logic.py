@@ -100,7 +100,6 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
                     headers.append("")
                 elif n == "Mexico":
                     h_counts["Mexico"] = h_counts.get("Mexico", 0) + 1
-                    # 这里必须和 UI 保持一致：1号是 full，2号是原名
                     if h_counts["Mexico"] == 1:
                         final_name = "Mexico (full)"
                     else:
@@ -127,19 +126,26 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
     ml_upc_key = next((k for k in col_map.keys() if "Universal product code" in k), None)
     sku_key = next((k for k in col_map.keys() if "SKU" in k), None)
     all_color_keys = [k for k in col_map.keys() if "color" in k.lower()]
-    # 颜色递增准备
-    color_start_val = ""
+
+    # --- 修改部分：颜色递增配置初始化 (支持多列独立识别) ---
+    color_inc_configs = {}
     for ck in all_color_keys:
-        if ck in static_fills: color_start_val = static_fills[ck]; break
-    color_match = re.match(r"([a-zA-Z]+)([0-9]+)", str(color_start_val))
-    color_prefix, color_num = (color_match.group(1), int(color_match.group(2))) if color_match else ("", None)
+        if ck in static_fills:
+            val = str(static_fills[ck])
+            # 尝试匹配 字母+数字 格式 (如 Aa101)
+            color_match = re.match(r"([a-zA-Z]+)([0-9]+)", val)
+            if color_match:
+                color_inc_configs[ck] = {
+                    "prefix": color_match.group(1),
+                    "start_num": int(color_match.group(2))
+                }
+    # ----------------------------------------------------
 
     # --- 2. 核心填充循环 ---
     for i, (_, row_data) in enumerate(source_df.iterrows()):
         curr_row = start_row + i
 
         # A. 基础字段
-        # 标题处理 + 60字符自动截断
         real_title_key = next((k for k in col_map.keys() if "Title" in k and "Number" not in k), None)
         if real_title_key:
             title_v = str(row_data[mapping_config['title_col']])
@@ -148,7 +154,6 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
                 title_v = title_v[:60].strip()
             safe_write(ws, curr_row, col_map[real_title_key], title_v)
 
-        # 图片、SKU、UPC
         photo_key = next((k for k in col_map.keys() if "Photos" in k), None)
         if photo_key: safe_write(ws, curr_row, col_map[photo_key], row_data[mapping_config['img_col']])
 
@@ -161,17 +166,17 @@ def process_mercado_listing(source_df, template_bytes, sheet_name, mapping_confi
 
         # B. 静态配置字段填充
         for header_key, val in static_fills.items():
-            # 💡 这里是关键：UI 传过来的 Mexico 如果对应 JSON 里的 Mexico_2，
-            # 那么 header_key 必须精准匹配 col_map 里的 Mexico_2
             if header_key in col_map:
                 target_col = col_map[header_key]
                 h_low = header_key.lower()
                 final_val = val
 
-                # 颜色递增
-                if header_key in all_color_keys and color_num is not None:
-                    final_val = f"{color_prefix}{color_num + i}"
-                # 描述清洗
+                # --- 修改部分：根据列名精准判断是否递增 ---
+                if header_key in color_inc_configs:
+                    cfg = color_inc_configs[header_key]
+                    final_val = f"{cfg['prefix']}{cfg['start_num'] + i}"
+                # ----------------------------------------
+
                 elif "description" in h_low:
                     clean_v = re.sub(r'</p>|<br\s*/?>', '\n', str(val))
                     clean_v = re.sub(r'<[^>]+>', '', clean_v)
