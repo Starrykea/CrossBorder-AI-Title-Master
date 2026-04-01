@@ -27,6 +27,15 @@ st.set_page_config(page_title=f"跨境AI大师 {VERSION}", layout="wide", page_i
 if 'optimization_done' not in st.session_state: st.session_state.optimization_done = False
 if 'final_results' not in st.session_state: st.session_state.final_results = []
 if 'process_logs' not in st.session_state: st.session_state.process_logs = []
+if 'is_running' not in st.session_state: st.session_state.is_running = False
+if 'current_df' not in st.session_state: st.session_state.current_df = None  # 存储当前正在处理的数据
+
+
+# --- 停止按钮的回调函数 ---
+def stop_optimization():
+    st.session_state.is_running = False
+    st.toast("正在请求停止任务...", icon="🛑")
+
 
 # ================= 权限校验 =================
 if 'authenticated' not in st.session_state: st.session_state.authenticated = False
@@ -62,36 +71,16 @@ with st.sidebar:
     # --- 任务逻辑控制 ---
     st.subheader("🛠️ 任务逻辑控制")
 
-    # 1. 全局去重开关
-    use_deduplicate = st.checkbox(
-        "开启全局去重",
-        value=True,
-        help="开启：相同标题会被归类；关闭：每行独立优化。"
-    )
+    use_deduplicate = st.checkbox("开启全局去重", value=True)
 
-    # 【新增】：分组去重上限设置
-    # 只有在开启去重时才显示这个设置
-    deduplicate_limit = 999999  # 默认一个极大值
+    deduplicate_limit = 999999
     if use_deduplicate:
         deduplicate_limit = st.number_input(
             "分组去重上限 (Threshold)",
-            min_value=1,
-            max_value=999,
-            value=99,
-            help="每隔多少个重复标题强制生成一个新的AI变体。例如设为99，则前99个重复标题用同一个优化结果，第100个会重新生成。"
+            min_value=1, max_value=999, value=99
         )
 
-    # 2. AI 创造力滑块
-    user_temperature = st.slider(
-        "🎨 AI 创造力 (Temperature)",
-        min_value=0.0,
-        max_value=1.5,
-        value=0.7,
-        step=0.1,
-        help="0.0 最稳定；值越高，生成的标题差异越大。"
-    )
-
-    # 3. 优化参数
+    user_temperature = st.slider("🎨 AI 创造力 (Temperature)", 0.0, 1.5, 0.7, 0.1)
     char_limit = st.slider("标题字符上限", 10, 200, 60)
     sleep_time = st.slider("🔥 间隔休眠时间 (秒)", 0.0, 50.0, 10.0, step=0.5)
 
@@ -100,73 +89,107 @@ with st.sidebar:
 
     batch_size = st.number_input("📦 每批次处理个数", min_value=1, max_value=100, value=50)
 
-    # 底部状态展示优化
-    if use_deduplicate:
-        st.info(f"💡 当前模式：🚀 分组去重 (每 {deduplicate_limit} 条切片)")
-    else:
-        st.info(f"💡 当前模式：🎨 逐行独立重写")
-
 # ================= 主界面 =================
 tab_seo, tab_listing = st.tabs(["🔥 标题批量优化轮", "📦 美克多列表自动上架"])
 
-# --- TAB 1: 标题优化 ---
 with tab_seo:
     st.title("🚀 AI 标题优化引擎")
 
     if st.session_state.optimization_done:
         if st.button("🗑️ 清空所有结果与日志", use_container_width=True):
             st.session_state.optimization_done = False
+            st.session_state.is_running = False
             st.session_state.final_results = []
             st.session_state.process_logs = []
+            st.session_state.current_df = None
             st.rerun()
 
     uploaded_files = st.file_uploader("上传待处理文件", type=['xlsx', 'csv'], accept_multiple_files=True)
 
+    # 显示断点提示
+    if st.session_state.current_df is not None and not st.session_state.optimization_done:
+        st.warning("📊 检测到上次未完成的任务，点击“继续”将从断点处开始。")
+
     if uploaded_files and not st.session_state.optimization_done:
-        if st.button("🔥 启动多轮优化任务", type="primary", use_container_width=True):
+        col_start, col_stop = st.columns(2)
+
+        with col_start:
+            btn_label = "▶️ 继续优化任务" if st.session_state.current_df is not None else "🔥 启动优化任务"
+            start_btn = st.button(
+                btn_label,
+                type="primary",
+                use_container_width=True,
+                disabled=st.session_state.is_running  # 运行中禁用
+            )
+        with col_stop:
+            st.button(
+                "🛑 停止优化",
+                use_container_width=True,
+                on_click=stop_optimization,  # 通过回调函数立即修改 is_running 为 False
+                disabled=not st.session_state.is_running  # 非运行中禁用
+            )
+
+        # --- 触发逻辑：点击启动按钮仅切换状态并刷新 ---
+        if start_btn:
             if not user_keys:
                 st.error("❌ 请先配置 API Key")
             else:
-                st.session_state.process_logs = []
-                with st.status("🚀 AI 正在努力工作中...", expanded=True) as status:
-                    log_area = st.empty()
+                st.session_state.is_running = True
+                if st.session_state.current_df is None:
+                    st.session_state.process_logs = []
+                st.rerun()  # 🚀 关键：强制刷新，让按钮状态立刻反转，并进入下方的执行逻辑
 
-                    # 关键点：将 deduplicate_limit 传给后端函数
-                    task_gen = start_optimization_task(
-                        uploaded_files=uploaded_files,
-                        platform=target_platform,
-                        char_limit=char_limit,
-                        language=target_lang,
-                        api_keys=user_keys,
-                        batch_size=batch_size,
-                        sleep_time=sleep_time,
-                        model_name=model_name,
-                        base_url=base_url,
-                        use_deduplicate=use_deduplicate,
-                        deduplicate_limit=deduplicate_limit,  # <--- 新增参数传递
-                        temperature=user_temperature
-                    )
+        # --- 核心执行逻辑：独立于按钮点击，依赖 is_running 状态 ---
+        if st.session_state.is_running and not st.session_state.optimization_done:
+            with st.status("🚀 AI 正在努力工作中...", expanded=True) as status:
+                log_area = st.empty()
 
-                    for msg in task_gen:
-                        if msg == "FINISH_SIGNAL":
-                            st.session_state.final_results = next(task_gen)
-                            st.session_state.optimization_done = True
-                            status.update(label="✅ 任务圆满完成！", state="complete")
-                        else:
-                            l_entry = f"[{time.strftime('%H:%M:%S')}] {msg}"
-                            st.session_state.process_logs.append(l_entry)
-                            log_area.code("\n".join(st.session_state.process_logs[-15:]), language="bash")
+                task_gen = start_optimization_task(
+                    uploaded_files=uploaded_files,
+                    platform=target_platform,
+                    char_limit=char_limit,
+                    language=target_lang,
+                    api_keys=user_keys,
+                    batch_size=batch_size,
+                    sleep_time=sleep_time,
+                    model_name=model_name,
+                    base_url=base_url,
+                    use_deduplicate=use_deduplicate,
+                    deduplicate_limit=deduplicate_limit,
+                    temperature=user_temperature,
+                    existing_df=st.session_state.current_df
+                )
+
+                for msg in task_gen:
+                    # 检查停止状态（当用户点击停止按钮触发回调后，这里会捕获到）
+                    if not st.session_state.is_running:
+                        break
+
+                    if isinstance(msg, pd.DataFrame):
+                        st.session_state.current_df = msg
+                    elif isinstance(msg, list):
+                        st.session_state.final_results = msg
+                        st.session_state.optimization_done = True
+                        st.session_state.is_running = False
+                        status.update(label="✅ 任务圆满完成！", state="complete")
+                    elif msg == "FINISH_SIGNAL":
+                        pass
+                    else:
+                        l_entry = f"[{time.strftime('%H:%M:%S')}] {msg}"
+                        st.session_state.process_logs.append(l_entry)
+                        log_area.code("\n".join(st.session_state.process_logs[-15:]), language="bash")
+
+                # 无论是因为完成还是手动停止跳出循环，都执行一次刷新更新 UI
                 st.rerun()
 
     if st.session_state.optimization_done:
         st.subheader("✅ 优化结果清单预览")
-        with st.expander("查看完整处理日志"):
+        with st.expander("📝 查看本次执行完整日志", expanded=False):
             st.code("\n".join(st.session_state.process_logs), language="bash")
 
         d_cols = st.columns(3)
         for idx, (f_name, df_res) in enumerate(st.session_state.final_results):
             with d_cols[idx % 3]:
-                # 编码选择 utf-8-sig 兼容 Excel 打开不乱码
                 csv_data = df_res.to_csv(index=False).encode('utf-8-sig')
                 st.download_button(
                     label=f"📥 下载 {f_name}",

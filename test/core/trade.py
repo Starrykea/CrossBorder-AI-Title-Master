@@ -6,26 +6,23 @@ import io
 from openai import OpenAI
 
 # 定义版本号
-VERSION = "v2.3.0-Group-Deduplication"
+VERSION = "v2.3.1-Checkpoint-Ready"  # 增加了断点存盘支持
 
 
 def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, model_name, base_url, is_retry=False,
                       temperature=0):
     """
-    核心优化引擎：处理传入的字典，返回优化后的结果
+    核心优化引擎：保持不变
     """
     if not id_titles_dict:
         return {}, "Empty"
 
-    # 将待处理数据格式化为 #ID: Title 形式
     input_payload = "\n".join([f"#{k}: {v}" for k, v in id_titles_dict.items()])
 
-    # 针对重试轮次的严厉提醒
     retry_warning = ""
     if is_retry:
         retry_warning = f"⚠️ [重要] 之前的尝试依然超长，包含空格必须在 {char_limit} 字符以内，确保达标！"
 
-    # 构造 Prompt (集成了之前的结构多样化与去逗号要求)
     prompt = (
         f"你是{platform}专家。优化以下标题，语言：{language}。要求如下：\n"
         f"1. **硬指标**：包含空格在内必须 < {char_limit} 字符。**严禁使用任何逗号或分号**，省略1pc，保留2pc以上套装属性。\n"
@@ -60,14 +57,12 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             )
             output = response.choices[0].message.content
 
-            # 解析返回结果
             matches = re.findall(r'#(\d+)[:：](.*)', output)
             batch_results = {}
             success_count = 0
 
             for m_id, m_content in matches:
                 u_id = int(m_id)
-                # 强制清理：去掉逗号并将多余空格合并
                 optimized_text = m_content.strip().replace(',', ' ')
                 optimized_text = " ".join(optimized_text.split())
 
@@ -91,61 +86,66 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
 
 
 def start_optimization_task(uploaded_files, platform, char_limit, language, api_keys, batch_size, sleep_time,
-                            model_name, base_url, use_deduplicate=True, deduplicate_limit=99, temperature=0.7):
+                            model_name, base_url, use_deduplicate=True, deduplicate_limit=99, temperature=0.7,
+                            existing_df=None):  # 新增 existing_df 参数支持断点续传
     """
-    任务分发函数：支持分组去重上限
+    任务分发函数：支持实时进度保存
     """
     key_pool = itertools.cycle(api_keys)
+    processed_results = []
     mode_label = f"分组去重(上限:{deduplicate_limit})" if use_deduplicate else "逐行独立"
     yield f"🚀 引擎启动 | {VERSION} | 模式: {mode_label}"
 
-    processed_results = []
+    # 如果是从 session_state 恢复的，uploaded_files 可能是空的，我们直接用 existing_df
+    files_to_process = uploaded_files if uploaded_files else [None]
 
-    for file_obj in uploaded_files:
-        yield f"📂 读取文件: {file_obj.name}"
-        try:
-            df = pd.read_excel(file_obj)
-        except:
-            file_obj.seek(0)
-            df = pd.read_csv(file_obj, encoding='utf-8-sig')
+    for file_obj in files_to_process:
+        if existing_df is not None:
+            df = existing_df
+            fname = "上次未完成的任务"
+        else:
+            yield f"📂 读取文件: {file_obj.name}"
+            fname = file_obj.name
+            try:
+                df = pd.read_excel(file_obj)
+            except:
+                file_obj.seek(0)
+                df = pd.read_csv(file_obj, encoding='utf-8-sig')
 
         target_col = next((c for c in df.columns if any(k in str(c).lower() for k in ['标题', 'title', 'name'])), None)
         if not target_col:
-            yield f"⚠️ 找不到标题列，跳过 {file_obj.name}"
+            yield f"⚠️ 找不到标题列，跳过 {fname}"
             continue
+
         df[target_col] = df[target_col].astype(str).replace('nan', '')
+
+        # --- 修改点：如果列已存在，不覆盖原有状态 (实现断点续传的关键) ---
         if 'AI_Status' not in df.columns:
             df['AI_Status'] = "Pending"
 
         for round_idx in range(1, 4):
-            pending_mask = df['AI_Status'] != 'Optimized'
+            # 只选出还没成功的行
+            pending_mask = (df['AI_Status'] != 'Optimized')
             pending_df = df[pending_mask].copy()
 
             if pending_df.empty:
-                yield f"✅ 所有标题已达标，提前结束优化。"
+                yield f"✅ 所有标题已达标。"
                 break
 
-            # --- 1. 任务映射逻辑 (支持分组切片) ---
             title_to_indices = {}
-
             if use_deduplicate:
-                # 1.1 全量聚合
                 raw_groups = {}
                 for idx, row in pending_df.iterrows():
                     original_t = str(row[target_col])
                     raw_groups.setdefault(original_t, []).append(idx)
 
-                # 1.2 分组切片逻辑
                 for original_t, all_indices in raw_groups.items():
-                    # 将同一标题的索引列表按 deduplicate_limit 切分
                     for i in range(0, len(all_indices), deduplicate_limit):
                         chunk = all_indices[i: i + deduplicate_limit]
                         chunk_id = i // deduplicate_limit
-                        # 构造唯一键：标题 + 块标识
                         unique_key = f"{original_t}__chunk{chunk_id}"
                         title_to_indices[unique_key] = chunk
             else:
-                # 逐行独立模式
                 for idx, row in pending_df.iterrows():
                     unique_key = f"{row[target_col]}__row{idx}"
                     title_to_indices[unique_key] = [idx]
@@ -153,22 +153,17 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
             unique_keys = list(title_to_indices.keys())
             total_unique = len(unique_keys)
 
-            yield f"🔄 [第 {round_idx} 轮] 待处理任务: {total_unique} 条"
+            yield f"🔄 [第 {round_idx} 轮] 待处理: {total_unique} 条"
 
-            # --- 2. 按批次处理 ---
             for i in range(0, total_unique, batch_size):
                 current_batch_keys = unique_keys[i: i + batch_size]
-
                 batch_payload = {}
                 id_to_key = {}
                 for b_idx, key in enumerate(current_batch_keys):
-                    # 还原原始标题：支持 __chunk 或 __row 分隔
                     original_title = re.split(r"__(chunk|row)", key)[0]
                     batch_payload[b_idx] = original_title
                     id_to_key[b_idx] = key
 
-                # 策略控制：如果设置了分组上限且标题被切分，必须使用 temperature 产生差异
-                # 否则即使切分了，AI 也会对同样的标题返回同样的结果
                 current_temp = temperature if (not use_deduplicate or deduplicate_limit < 500) else 0
 
                 results, log_msg = ai_rewrite_engine(
@@ -177,7 +172,6 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                     temperature=current_temp
                 )
 
-                # --- 3. 结果写回 ---
                 for batch_id, (opt_text, status) in results.items():
                     final_status = "Optimized" if len(opt_text) <= char_limit else "Length_Exceeded"
                     target_key = id_to_key.get(batch_id)
@@ -188,20 +182,21 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                             df.at[row_idx, target_col] = opt_text
                             df.at[row_idx, 'AI_Status'] = final_status
 
+                # --- 修改点：每个 Batch 处理完后，直接 yield 当前的 DF ---
+                # 这允许 UI 捕获并更新 st.session_state
+                yield df
+
                 yield f"📝 [轮次{round_idx}] {log_msg} | 进度: {min(i + batch_size, total_unique)}/{total_unique}"
 
                 if i + batch_size < total_unique:
                     time.sleep(sleep_time)
 
-        final_stats = df['AI_Status'].value_counts()
-        success = final_stats.get('Optimized', 0)
-        failed = final_stats.get('Length_Exceeded', 0)
-
-        if failed > 0:
-            yield f"⚠️ 注意：经过3轮优化，仍有 {failed} 条标题超长。"
-
-        yield f"📊 文件 {file_obj.name} 处理完成！成功: {success}，失败: {failed}。"
-        processed_results.append((file_obj.name, df))
-
-    yield "FINISH_SIGNAL"
-    yield processed_results
+            # 统计并返回
+            final_stats = df['AI_Status'].value_counts()
+            yield f"📊 {fname} 处理完成！成功: {final_stats.get('Optimized', 0)} 条。"
+            fname = file_obj.name if file_obj else "Recovered_Task.xlsx"
+            processed_results.append((fname, df))
+            # 处理完一个文件后重置 existing_df 防止干扰下一个文件
+            existing_df = None
+        yield "FINISH_SIGNAL"
+        yield processed_results  # 💡 最后一次 yield，直接把列表丢出去
