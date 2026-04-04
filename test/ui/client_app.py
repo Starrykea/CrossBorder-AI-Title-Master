@@ -28,7 +28,7 @@ if 'optimization_done' not in st.session_state: st.session_state.optimization_do
 if 'final_results' not in st.session_state: st.session_state.final_results = []
 if 'process_logs' not in st.session_state: st.session_state.process_logs = []
 if 'is_running' not in st.session_state: st.session_state.is_running = False
-if 'current_df' not in st.session_state: st.session_state.current_df = None  # 存储当前正在处理的数据
+if 'current_df' not in st.session_state: st.session_state.current_df = None
 
 
 # --- 停止按钮的回调函数 ---
@@ -51,8 +51,23 @@ if not st.session_state.authenticated:
 # ================= 侧边栏 =================
 with st.sidebar:
     st.header("⚙️ 引擎配置")
-    engine_type = st.selectbox("AI 引擎", ["Google Gemini", "DeepSeek"])
 
+    # --- 新增：优化模式选择 ---
+    st.subheader("🎯 优化模式")
+    opt_mode = st.radio(
+        "选择模式",
+        ["AI优化标题", "列组合优化"],
+        help="【AI优化标题】: 仅对原标题进行SEO优化。\n【列组合优化】: 将选定列(如SKU)的内容强制作为关键词整合进标题。"
+    )
+
+    st.divider()
+    st.subheader("🚫 违禁词过滤")
+    negative_keywords = st.text_input(
+        "输入禁止出现的词汇（多个请用逗号隔开）",
+        placeholder="例如: Best, Cheap, Nike, Medical",
+        help="AI在优化标题时会严格避开这些词汇"
+    )
+    engine_type = st.selectbox("AI 引擎", ["Google Gemini", "DeepSeek"])
     default_url = "https://generativelanguage.googleapis.com/v1beta/openai/" if engine_type == "Google Gemini" else "https://api.deepseek.com"
     base_url = st.text_input("API URL", value=default_url)
 
@@ -68,24 +83,19 @@ with st.sidebar:
 
     st.divider()
 
-    # --- 任务逻辑控制 ---
     st.subheader("🛠️ 任务逻辑控制")
-
     use_deduplicate = st.checkbox("开启全局去重", value=True)
-
     deduplicate_limit = 999999
     if use_deduplicate:
-        deduplicate_limit = st.number_input(
-            "分组去重上限 (Threshold)",
-            min_value=1, max_value=999, value=99
-        )
+        deduplicate_limit = st.number_input("分组去重上限", min_value=1, max_value=999, value=99)
 
-    user_temperature = st.slider("🎨 AI 创造力 (Temperature)", 0.0, 1.5, 0.7, 0.1)
+    user_temperature = st.slider("🎨 AI 创造力", 0.0, 1.5, 0.7, 0.1)
     char_limit = st.slider("标题字符上限", 10, 200, 60)
     sleep_time = st.slider("🔥 间隔休眠时间 (秒)", 0.0, 50.0, 10.0, step=0.5)
 
-    target_platform = st.selectbox("目标平台", ["Mercado Libre", "Amazon", "Shopee"])
-    target_lang = st.selectbox("目标语言", ["英语", "西班牙语", "葡萄牙语", "中文"])
+    target_platform = st.selectbox("目标平台", ["Mercado Libre", "Amazon", "Shopee", "Rakuten.fr"])
+    # 语言增加了法语选项
+    target_lang = st.selectbox("目标语言", ["英语", "法语", "西班牙语", "葡萄牙语", "中文"])
 
     batch_size = st.number_input("📦 每批次处理个数", min_value=1, max_value=100, value=50)
 
@@ -94,7 +104,8 @@ tab_seo, tab_listing = st.tabs(["🔥 标题批量优化轮", "📦 美克多列
 
 with tab_seo:
     st.title("🚀 AI 标题优化引擎")
-
+    selected_sheet = None
+    selected_extra_cols = []
     if st.session_state.optimization_done:
         if st.button("🗑️ 清空所有结果与日志", use_container_width=True):
             st.session_state.optimization_done = False
@@ -106,82 +117,123 @@ with tab_seo:
 
     uploaded_files = st.file_uploader("上传待处理文件", type=['xlsx', 'csv'], accept_multiple_files=True)
 
-    # 显示断点提示
-    if st.session_state.current_df is not None and not st.session_state.optimization_done:
-        st.warning("📊 检测到上次未完成的任务，点击“继续”将从断点处开始。")
-
+    # --- 布局逻辑：导入文件后，分为左右两栏 ---
     if uploaded_files and not st.session_state.optimization_done:
-        col_start, col_stop = st.columns(2)
+        col_main, col_side_options = st.columns([2, 1])  # 左侧占2/3，右侧占1/3
 
-        with col_start:
-            btn_label = "▶️ 继续优化任务" if st.session_state.current_df is not None else "🔥 启动优化任务"
-            start_btn = st.button(
-                btn_label,
-                type="primary",
-                use_container_width=True,
-                disabled=st.session_state.is_running  # 运行中禁用
-            )
-        with col_stop:
-            st.button(
-                "🛑 停止优化",
-                use_container_width=True,
-                on_click=stop_optimization,  # 通过回调函数立即修改 is_running 为 False
-                disabled=not st.session_state.is_running  # 非运行中禁用
-            )
+        # --- 右侧：配置区 (Sheet 选择 + 表头选择) ---
+        selected_extra_cols = []
+        with col_side_options:
+            if opt_mode == "列组合优化":
+                st.subheader("🔗 关键词组合配置")
+                try:
+                    f = uploaded_files[0]
+                    all_cols = []
 
-        # --- 触发逻辑：点击启动按钮仅切换状态并刷新 ---
-        if start_btn:
-            if not user_keys:
-                st.error("❌ 请先配置 API Key")
-            else:
-                st.session_state.is_running = True
-                if st.session_state.current_df is None:
-                    st.session_state.process_logs = []
-                st.rerun()  # 🚀 关键：强制刷新，让按钮状态立刻反转，并进入下方的执行逻辑
+                    # 1. 如果是 Excel，需要先选 Sheet
+                    if f.name.endswith(('.xlsx', '.xls')):
+                        excel_file = pd.ExcelFile(f)
+                        sheet_names = excel_file.sheet_names
+                        selected_sheet = st.selectbox("第一步：选择工作表 (Sheet)", options=sheet_names)
 
-        # --- 核心执行逻辑：独立于按钮点击，依赖 is_running 状态 ---
-        if st.session_state.is_running and not st.session_state.optimization_done:
-            with st.status("🚀 AI 正在努力工作中...", expanded=True) as status:
-                log_area = st.empty()
-
-                task_gen = start_optimization_task(
-                    uploaded_files=uploaded_files,
-                    platform=target_platform,
-                    char_limit=char_limit,
-                    language=target_lang,
-                    api_keys=user_keys,
-                    batch_size=batch_size,
-                    sleep_time=sleep_time,
-                    model_name=model_name,
-                    base_url=base_url,
-                    use_deduplicate=use_deduplicate,
-                    deduplicate_limit=deduplicate_limit,
-                    temperature=user_temperature,
-                    existing_df=st.session_state.current_df
-                )
-
-                for msg in task_gen:
-                    # 检查停止状态（当用户点击停止按钮触发回调后，这里会捕获到）
-                    if not st.session_state.is_running:
-                        break
-
-                    if isinstance(msg, pd.DataFrame):
-                        st.session_state.current_df = msg
-                    elif isinstance(msg, list):
-                        st.session_state.final_results = msg
-                        st.session_state.optimization_done = True
-                        st.session_state.is_running = False
-                        status.update(label="✅ 任务圆满完成！", state="complete")
-                    elif msg == "FINISH_SIGNAL":
-                        pass
+                        if selected_sheet:
+                            # 2. 读取选中 Sheet 的表头
+                            df_cols = pd.read_excel(f, sheet_name=selected_sheet, nrows=0)
+                            all_cols = df_cols.columns.tolist()
                     else:
-                        l_entry = f"[{time.strftime('%H:%M:%S')}] {msg}"
-                        st.session_state.process_logs.append(l_entry)
-                        log_area.code("\n".join(st.session_state.process_logs[-15:]), language="bash")
+                        # CSV 文件直接读取表头
+                        df_cols = pd.read_csv(f, nrows=0)
+                        all_cols = df_cols.columns.tolist()
 
-                # 无论是因为完成还是手动停止跳出循环，都执行一次刷新更新 UI
-                st.rerun()
+                    # 3. 展示多选框
+                    if all_cols:
+                        st.write("---")
+                        selected_extra_cols = st.multiselect(
+                            "第二步：勾选要组合的列 (如: SKU)",
+                            options=all_cols,
+                            help="选中的列内容将强制出现在AI生成的标题中",
+                            placeholder="点击选择字段"
+                        )
 
+                    if not selected_extra_cols:
+                        st.warning("⚠️ 请完成字段勾选")
+                    else:
+                        st.success(f"已选中 {len(selected_extra_cols)} 个字段")
+
+                except Exception as e:
+                    st.error(f"读取文件失败: {e}")
+            else:
+                st.info("💡 当前为标准优化模式\n无需配置额外字段")
+
+        # --- 左侧：核心任务控制区 (逻辑保持不变) ---
+        with col_main:
+            if st.session_state.current_df is not None:
+                st.warning("📊 检测到断点，将从上次位置继续")
+
+            col_start, col_stop = st.columns(2)
+            with col_start:
+                btn_label = "▶️ 继续优化任务" if st.session_state.current_df is not None else "🔥 启动优化任务"
+                start_btn = st.button(btn_label, type="primary", use_container_width=True,
+                                      disabled=st.session_state.is_running)
+            with col_stop:
+                st.button("🛑 停止优化", use_container_width=True, on_click=stop_optimization,
+                          disabled=not st.session_state.is_running)
+
+            if start_btn:
+                if not user_keys:
+                    st.error("❌ 请先配置 API Key")
+                elif opt_mode == "列组合优化" and not selected_extra_cols:
+                    st.error("❌ 请先选择需要组合的关键词列")
+                else:
+                    st.session_state.is_running = True
+                    if st.session_state.current_df is None:
+                        st.session_state.process_logs = []
+                    st.rerun()
+
+            # 运行状态展示
+            if st.session_state.is_running:
+                with st.status("🚀 AI 正在努力工作中...", expanded=True) as status:
+                    log_area = st.empty()
+
+                    task_gen = start_optimization_task(
+                        uploaded_files=uploaded_files,
+                        platform=target_platform,
+                        char_limit=char_limit,
+                        language=target_lang,
+                        api_keys=user_keys,
+                        batch_size=batch_size,
+                        sleep_time=sleep_time,
+                        model_name=model_name,
+                        base_url=base_url,
+                        use_deduplicate=use_deduplicate,
+                        deduplicate_limit=deduplicate_limit,
+                        temperature=user_temperature,
+                        existing_df=st.session_state.current_df,
+                        opt_mode=opt_mode,
+                        selected_extra_cols=selected_extra_cols,
+                        selected_sheet = selected_sheet  # 👈 确保这里传了 UI 右侧选中的值
+                    )
+
+                    for msg in task_gen:
+                        if not st.session_state.is_running:
+                            break
+                        if isinstance(msg, pd.DataFrame):
+                            st.session_state.current_df = msg
+                        elif isinstance(msg, list):
+                            st.session_state.final_results = msg
+                            st.session_state.optimization_done = True
+                            st.session_state.is_running = False
+                            status.update(label="✅ 任务圆满完成！", state="complete")
+                        elif msg == "FINISH_SIGNAL":
+                            pass
+                        else:
+                            l_entry = f"[{time.strftime('%H:%M:%S')}] {msg}"
+                            st.session_state.process_logs.append(l_entry)
+                            log_area.code("\n".join(st.session_state.process_logs[-15:]), language="bash")
+
+                    st.rerun()
+
+    # --- 处理完成后的下载展示区 ---
     if st.session_state.optimization_done:
         st.subheader("✅ 优化结果清单预览")
         with st.expander("📝 查看本次执行完整日志", expanded=False):
@@ -190,11 +242,30 @@ with tab_seo:
         d_cols = st.columns(3)
         for idx, (f_name, df_res) in enumerate(st.session_state.final_results):
             with d_cols[idx % 3]:
-                csv_data = df_res.to_csv(index=False).encode('utf-8-sig')
+                # 判断原始文件格式
+                is_csv = f_name.lower().endswith('.csv')
+
+                if is_csv:
+                    # CSV 处理逻辑：使用 utf-8-sig 防止西语/中文乱码
+                    download_data = df_res.to_csv(index=False).encode('utf-8-sig')
+                    mime_type = "text/csv"
+                    final_name = f"Opt_{f_name}"
+                else:
+                    # Excel 处理逻辑：使用 BytesIO 构建二进制流
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                        df_res.to_excel(writer, index=False, sheet_name='Sheet1')
+                    download_data = buffer.getvalue()
+                    mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    # 确保后缀名正确
+                    base_name = f_name.rsplit('.', 1)[0]
+                    final_name = f"Opt_{base_name}.xlsx"
+
                 st.download_button(
                     label=f"📥 下载 {f_name}",
-                    data=csv_data,
-                    file_name=f"Opt_{f_name}",
+                    data=download_data,
+                    file_name=final_name,
+                    mime=mime_type,
                     key=f"dl_{idx}",
                     use_container_width=True
                 )
