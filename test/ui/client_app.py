@@ -93,7 +93,7 @@ with st.sidebar:
     char_limit = st.slider("标题字符上限", 10, 200, 60)
     sleep_time = st.slider("🔥 间隔休眠时间 (秒)", 0.0, 50.0, 10.0, step=0.5)
 
-    target_platform = st.selectbox("目标平台", ["Mercado Libre", "Amazon", "Shopee", "Rakuten.fr","Allegro"])
+    target_platform = st.selectbox("目标平台", ["Mercado Libre", "Amazon", "Shopee", "Rakuten.fr","noon"])
     # 语言增加了法语选项
     target_lang = st.selectbox("目标语言", ["英语", "法语", "西班牙语", "葡萄牙语", "中文","波兰语"])
 

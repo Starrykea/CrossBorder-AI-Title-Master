@@ -42,10 +42,10 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"3. **类目规则**：‘手机/平板配件’类目手机前面必须加 'pour '，其他类目严禁出现 'pour'。\n"
             f"{mode_instruction}\n"
         )
-    elif "Allegro" in platform.lower() or "波兰" in platform:
+    elif "noon" in platform.lower() or "波兰" in platform:
         # 波兰 Allegro 逻辑：强调标题可读性、核心词置前、语法地道
         platform_instruction = (
-            f"你现在是【波兰 Allegro】SEO专家。要求如下：\n"
+            f"你现在是【波兰 noon平台】SEO专家。要求如下：\n"
             f"1. **核心逻辑**：波兰语单词较长，请在 {char_limit} 字符内合理布局。**核心产品词必须放在标题最前面**。\n"
             f"2. **语法要求**：必须使用地道的波兰语（Polish），注意名词的变格，确保买家搜索时感到专业。\n"
             f"3. **符号指标**：仅允许使用空格，禁止使用任何特殊符号或表情。\n"
