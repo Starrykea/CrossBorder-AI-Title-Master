@@ -107,13 +107,13 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             return batch_results, f"OK({success_count}/{len(id_titles_dict)})"
         except Exception as e:
             if attempt < 3: time.sleep(3); continue
-            return {}, f"API_Error: {str(e)[:50]}"
+            return {}, f"API_Error: {str(e)}"
     return {}, "Max_Retries_Exceeded"
 
 
 def start_optimization_task(uploaded_files, platform, char_limit, language, api_keys, batch_size, sleep_time,
                             model_name, base_url, use_deduplicate=True, deduplicate_limit=99, temperature=0.7,
-                            existing_df=None, opt_mode="AI优化标题", selected_extra_cols=None, selected_sheet=None):
+                            existing_df=None, opt_mode="AI优化标题", selected_extra_cols=None, selected_sheet=None,negative_keywords=None):
     """
     任务分发函数：修复断点续传下的文件名丢失与结果合并问题
     """
@@ -209,7 +209,7 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
 
                 results, log_msg = ai_rewrite_engine(
                     batch_payload, char_limit, platform, language, key_pool, model_name, base_url,
-                    is_retry=(round_idx > 1), temperature=temperature, opt_mode=opt_mode
+                    is_retry=(round_idx > 1), temperature=temperature, opt_mode=opt_mode,negative_keywords=negative_keywords
                 )
 
                 # 回填结果
