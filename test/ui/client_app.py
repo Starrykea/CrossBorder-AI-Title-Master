@@ -211,6 +211,7 @@ with tab_seo:
                         existing_df=st.session_state.current_df,
                         opt_mode=opt_mode,
                         selected_extra_cols=selected_extra_cols,
+                        negative_keywords=negative_keywords,
                         selected_sheet = selected_sheet  # 👈 确保这里传了 UI 右侧选中的值
                     )
 

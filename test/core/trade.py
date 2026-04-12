@@ -6,7 +6,7 @@ import io
 from openai import OpenAI
 
 # 定义版本号
-VERSION = "v2.4.1-Deduplicate-Fixed"
+VERSION = "v2.4.2-Deduplicate-Fixed"
 
 
 def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, model_name, base_url,
