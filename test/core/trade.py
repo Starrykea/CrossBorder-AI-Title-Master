@@ -47,6 +47,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"     * 重心B (功能优先): [功能短语] + [核心词] + [数量/属性]\n"
             f"     * 重心C (核心优先): [核心词] + [数量] + [场景用语] + [属性]\n"
             f"     * 重心D (数量优先): [数量词变体] + [属性] + [核心词] + [功能]\n"
+            f"5. **属性保护**：删除 '1 pièces '，保留 '2 pièces ' 以上套装属性。必须保留颜色(Color)、材质(Material)或图案(Pattern)。\n"
             f"{mode_instruction}\n"
         )
     elif "noon" in platform.lower() or "波兰" in platform:
@@ -54,15 +55,15 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
         platform_instruction = (
             f"你现在是【波兰 noon平台】SEO专家。要求如下：\n"
             f"1. **核心逻辑**：波兰语单词较长，请在 {char_limit} 字符内合理布局。**核心产品词必须放在标题最前面**。\n"
-            f"2. **语法要求**：必须使用地道的波兰语（Polish），注意名词的变格，确保买家搜索时感到专业。\n"
-            f"3. **符号指标**：仅允许使用空格，禁止使用任何特殊符号或表情。\n"
-            f"4. **多样化**：同一批标题严禁句式雷同，随机切换重心（属性优先/功能优先/场景优先）。\n"
+            f"2. **符号指标**：仅允许使用空格，禁止使用任何特殊符号或表情。\n"
+            f"3. **多样化**：同一批标题严禁句式雷同，随机切换重心（属性优先/功能优先/场景优先）。\n"
             f"   - **同义词旋转**：随机交替使用 (2pcs, 1 Pair, 2-Pack, Set of 2) 以及 (Oven Mitts, Baking Gloves, Kitchen Mittens)。\n"
             f"   - **结构打乱**：随机切换以下四种重心：\n"
             f"     * 重心A (属性优先): [图案/颜色] + [核心词] + [功能/数量]\n"
             f"     * 重心B (功能优先): [功能短语] + [核心词] + [数量/属性]\n"
             f"     * 重心C (核心优先): [核心词] + [数量] + [场景用语] + [属性]\n"
             f"     * 重心D (数量优先): [数量词变体] + [属性] + [核心词] + [功能]\n"
+            f"4. **属性保护**：删除 '1pc'，保留 '2pcs' 以上套装属性。必须保留颜色(Color)、材质(Material)或图案(Pattern)。\n"
             f"{mode_instruction}\n"
         )
     elif "allegro" in platform.lower() or "波兰" in platform:
@@ -73,6 +74,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"2. **字符约束**：总长度严格控制在 {char_limit} 字符内（含空格）。波兰语单词较长，请优先保留核心属性，删减无意义修饰词。\n"
             f"3. **纯净格式**：禁止出现任何特殊符号（如：- , / * +），仅允许使用空格。不要使用所有字母大写。\n"
             f"4. **地道语法**：确保名词变格（Deklinacja）符合波兰语习惯，适配描述统一使用 'do [Model]' 格式。\n"
+            f"5. **属性保护**：删除 '1 szt. '，保留 '2 szt.' 以上套装属性。必须保留颜色(Color)、材质(Material)或图案(Pattern)。\n"
             f"{mode_instruction}\n"
         )
     else:
@@ -89,9 +91,10 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"     * 重心B (功能优先): [功能短语] + [核心词] + [数量/属性]\n"
             f"     * 重心C (核心优先): [核心词] + [数量] + [场景用语] + [属性]\n"
             f"     * 重心D (数量优先): [数量词变体] + [属性] + [核心词] + [功能]\n"
+            f"5. **属性保护**：删除 '1pc'，保留 '2pcs' 以上套装属性。必须保留颜色(Color)、材质(Material)或图案(Pattern)。\n"
+
         )
     common_rules = (
-        f"5. **属性保护**：删除 '1pc'，保留 '2pcs' 以上套装属性。必须保留颜色(Color)、材质(Material)或图案(Pattern)。\n"
         f"6. **列组合约束**：{'必须完整保留 [附加关键词] 内容，不得删减。' if opt_mode == '列组合优化' else '精简非核心修饰词。'}"
     )
 
