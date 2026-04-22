@@ -4,9 +4,10 @@ import re
 import itertools
 import io
 from openai import OpenAI
-
+import sqlite3
+import datetime
 # 定义版本号
-VERSION = "v2.4.2-Deduplicate-Fixed"
+VERSION = "v2.5.2-Deduplicate"
 
 
 def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, model_name, base_url,
@@ -139,126 +140,190 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
 
 
 def start_optimization_task(uploaded_files, platform, char_limit, language, api_keys, batch_size, sleep_time,
-                            model_name, base_url, use_deduplicate=True, deduplicate_limit=99, temperature=0.7,
+                            model_name, base_url, user_id,current_sid,use_deduplicate=True, deduplicate_limit=99, temperature=0.7,
                             existing_df=None, opt_mode="AI优化标题", selected_extra_cols=None, selected_sheet=None,negative_keywords=None):
     """
     任务分发函数：修复断点续传下的文件名丢失与结果合并问题
     """
-    key_pool = itertools.cycle(api_keys)
-    processed_results = []
-    yield f"🚀 引擎启动 | 模式: {opt_mode}"
+    conn = sqlite3.connect("seo_master.db", check_same_thread=False)
+    try:  # <--- 【必须添加 try 块】
+        key_pool = itertools.cycle(api_keys)
+        processed_results = []
+        # --- 0. 权限与会话预检 ---
+        # 检查是否到期或被踢下线
+        cursor = conn.cursor()
+        cursor.execute("SELECT expiry_date, last_session_id FROM users WHERE user_id = ?", (user_id,))
+        user_info = cursor.fetchone()
 
-    # 如果有断点数据，优先处理断点
-    if existing_df is not None:
-        files_to_process = [("BUFFER_TASK", existing_df)]
-    else:
-        files_to_process = [(f.name, f) for f in uploaded_files] if uploaded_files else []
+        if not user_info:
+            yield "❌ 用户不存在，任务终止"
+            return
 
-    for fname_raw, file_source in files_to_process:
-        # --- 1. 数据载入与文件名恢复 ---
-        if fname_raw == "BUFFER_TASK":
-            df = file_source
-            # 尝试从 st.session_state 恢复文件名，否则给个默认带后缀的名字
-            fname = "Recovered_Task.xlsx"
-            yield f"🔄 正在从断点恢复任务..."
+        expiry_date_str, last_sid = user_info
+        if datetime.datetime.strptime(expiry_date_str, '%Y-%m-%d').date() < datetime.date.today():
+            yield "❌ 账号已过期，请续费后使用"
+            return
+        yield f"🚀 引擎启动 | 用户ID: {user_id} | 模式: {opt_mode}"
+
+        # 如果有断点数据，优先处理断点
+        if existing_df is not None:
+            files_to_process = [("BUFFER_TASK", existing_df)]
         else:
-            fname = fname_raw
-            yield f"📂 正在读取: {fname}"
-            try:
-                if fname.endswith(('.xlsx', '.xls')):
-                    sheet_to_read = selected_sheet if selected_sheet else 0
-                    content = pd.read_excel(file_source, sheet_name=sheet_to_read)
-                    df = content[selected_sheet] if isinstance(content, dict) else content
-                else:
-                    file_source.seek(0)
-                    df = pd.read_csv(file_source, encoding='utf-8-sig')
-            except Exception as e:
-                yield f"❌ 读取失败: {e}"
+            files_to_process = [(f.name, f) for f in uploaded_files] if uploaded_files else []
+
+        for fname_raw, file_source in files_to_process:
+            # --- 1. 数据载入与文件名恢复 ---
+            if fname_raw == "BUFFER_TASK":
+                df = file_source
+                # 尝试从 st.session_state 恢复文件名，否则给个默认带后缀的名字
+                fname = "Recovered_Task.xlsx"
+                yield f"🔄 正在从断点恢复任务..."
+            else:
+                fname = fname_raw
+                yield f"📂 正在读取: {fname}"
+                try:
+                    if fname.endswith(('.xlsx', '.xls')):
+                        sheet_to_read = selected_sheet if selected_sheet else 0
+                        content = pd.read_excel(file_source, sheet_name=sheet_to_read)
+                        df = content[selected_sheet] if isinstance(content, dict) else content
+                    else:
+                        file_source.seek(0)
+                        df = pd.read_csv(file_source, encoding='utf-8-sig')
+                except Exception as e:
+                    yield f"❌ 读取失败: {e}"
+                    continue
+
+            # --- 2. 标题列定位 ---
+            target_col = next(
+                (c for c in df.columns if any(k in str(c).lower() for k in ['标题', 'title', 'name', '商品名称', '名称'])),
+                None)
+
+            if not target_col:
+                yield f"⚠️ 找不到标题列，跳过 {fname}"
                 continue
 
-        # --- 2. 标题列定位 ---
-        target_col = next(
-            (c for c in df.columns if any(k in str(c).lower() for k in ['标题', 'title', 'name', '商品名称', '名称'])),
-            None)
+            if 'AI_Status' not in df.columns:
+                df['AI_Status'] = "Pending"
 
-        if not target_col:
-            yield f"⚠️ 找不到标题列，跳过 {fname}"
-            continue
+            # 内部函数：处理列组合输入
+            def prepare_input(row):
+                original_title = str(row[target_col]).strip()
+                if opt_mode == "列组合优化" and selected_extra_cols:
+                    # 过滤掉 nan 值并拼接
+                    extra_info = " ".join(
+                        [str(row[col]).strip() for col in selected_extra_cols if str(row[col]).lower() != 'nan'])
+                    return f"[原标题]: {original_title} | [附加关键词]: {extra_info}"
+                return original_title
 
-        if 'AI_Status' not in df.columns:
-            df['AI_Status'] = "Pending"
+            # --- 3. 轮次优化逻辑 (1-3轮) ---
+            for round_idx in range(1, 4):
+                pending_mask = (df['AI_Status'] != 'Optimized')
+                pending_df = df[pending_mask].copy()
+                if pending_df.empty:
+                    break
 
-        # 内部函数：处理列组合输入
-        def prepare_input(row):
-            original_title = str(row[target_col]).strip()
-            if opt_mode == "列组合优化" and selected_extra_cols:
-                # 过滤掉 nan 值并拼接
-                extra_info = " ".join(
-                    [str(row[col]).strip() for col in selected_extra_cols if str(row[col]).lower() != 'nan'])
-                return f"[原标题]: {original_title} | [附加关键词]: {extra_info}"
-            return original_title
+                title_to_indices = {}
+                if use_deduplicate:
+                    raw_groups = {}
+                    for idx, row in pending_df.iterrows():
+                        input_str = prepare_input(row)
+                        raw_groups.setdefault(input_str, []).append(idx)
 
-        # --- 3. 轮次优化逻辑 (1-3轮) ---
-        for round_idx in range(1, 4):
-            pending_mask = (df['AI_Status'] != 'Optimized')
-            pending_df = df[pending_mask].copy()
-            if pending_df.empty:
-                break
+                    # 分组切片逻辑 (deduplicate_limit)
+                    for input_val, all_indices in raw_groups.items():
+                        for i in range(0, len(all_indices), deduplicate_limit):
+                            chunk = all_indices[i: i + deduplicate_limit]
+                            unique_key = f"{input_val}__grp{i}"
+                            title_to_indices[unique_key] = chunk
+                else:
+                    for idx, row in pending_df.iterrows():
+                        input_str = prepare_input(row)
+                        title_to_indices[f"{input_str}__row{idx}"] = [idx]
 
-            title_to_indices = {}
-            if use_deduplicate:
-                raw_groups = {}
-                for idx, row in pending_df.iterrows():
-                    input_str = prepare_input(row)
-                    raw_groups.setdefault(input_str, []).append(idx)
+                unique_keys = list(title_to_indices.keys())
+                total_unique = len(unique_keys)
+                yield f"🔄 [第 {round_idx} 轮] 待处理项: {total_unique}"
 
-                # 分组切片逻辑 (deduplicate_limit)
-                for input_val, all_indices in raw_groups.items():
-                    for i in range(0, len(all_indices), deduplicate_limit):
-                        chunk = all_indices[i: i + deduplicate_limit]
-                        unique_key = f"{input_val}__grp{i}"
-                        title_to_indices[unique_key] = chunk
-            else:
-                for idx, row in pending_df.iterrows():
-                    input_str = prepare_input(row)
-                    title_to_indices[f"{input_str}__row{idx}"] = [idx]
+                # --- 4. Batch 批处理执行 ---
+                for i in range(0, total_unique, batch_size):
+                    # 【防多端登录校验】
+                    cursor.execute("SELECT last_session_id FROM users WHERE user_id = ?", (user_id,))
+                    if cursor.fetchone()[0] != current_sid:
+                        yield "🛑 检测到账号在别处登录，当前任务已安全停止。"
+                        return  # 进入 finally 关闭连接
 
-            unique_keys = list(title_to_indices.keys())
-            total_unique = len(unique_keys)
-            yield f"🔄 [第 {round_idx} 轮] 待处理项: {total_unique}"
+                    current_batch_keys = unique_keys[i: i + batch_size]
+                    batch_payload = {}
 
-            # --- 4. Batch 批处理执行 ---
-            for i in range(0, total_unique, batch_size):
-                current_batch_keys = unique_keys[i: i + batch_size]
-                # 提取 AI 实际需要的文本内容 (剥离后缀)
-                batch_payload = {b_idx: k.split("__grp")[0].split("__row")[0] for b_idx, k in
-                                 enumerate(current_batch_keys)}
+                    # 【数据库缓存预检】
+                    for b_idx, k in enumerate(current_batch_keys):
+                        raw_input = k.split("__grp")[0].split("__row")[0]
+                        cursor.execute("""
+                                            SELECT optimized_title FROM optimized_history 
+                                            WHERE user_id = ? AND original_input = ? AND platform = ? AND char_limit = ?
+                                        """, (user_id, raw_input, platform, char_limit))
+                        cache = cursor.fetchone()
 
-                results, log_msg = ai_rewrite_engine(
-                    batch_payload, char_limit, platform, language, key_pool, model_name, base_url,
-                    is_retry=(round_idx > 1), temperature=temperature, opt_mode=opt_mode,negative_keywords=negative_keywords
-                )
+                        if cache:
+                            opt_text = cache[0]
+                            for row_idx in title_to_indices[k]:
+                                df.at[row_idx, target_col] = opt_text
+                                df.at[row_idx, 'AI_Status'] = "Optimized"
+                        else:
+                            batch_payload[b_idx] = raw_input
 
-                # 回填结果
-                for batch_id, (opt_text, status) in results.items():
-                    target_key = current_batch_keys[batch_id]
-                    target_rows = title_to_indices[target_key]
-                    for row_idx in target_rows:
-                        df.at[row_idx, target_col] = opt_text
-                        df.at[row_idx, 'AI_Status'] = status
+                    # 【调用 AI 引擎】
+                    if batch_payload:
+                        results, log_msg = ai_rewrite_engine(
+                            id_titles_dict=batch_payload,  # 1. 这一批次的原始标题
+                            char_limit=char_limit,  # 2. 字符限制 (从函数参数来)
+                            platform=platform,  # 3. 平台 (从函数参数来)
+                            language=language,  # 4. 语言 (从函数参数来)
+                            key_pool=key_pool,  # 5. API密钥池
+                            model_name=model_name,  # 6. 模型名称
+                            base_url=base_url,  # 7. 接口地址
+                            is_retry=(round_idx > 1),  # 8. 是否重试
+                            temperature=temperature,  # 9. 随机度
+                            opt_mode=opt_mode,  # 10. 模式
+                            negative_keywords=negative_keywords  # 11. 违禁词
+                        ) # 此处传入你的参数
 
-                # 每一组 batch 完成后 yield 一次 df，用于 UI 实时存盘
-                yield df
-                yield f"📝 {log_msg} | 进度: {min(i + batch_size, total_unique)}/{total_unique}"
+                        # 回填并存入数据库
+                        for batch_id, (opt_text, status) in results.items():
+                            target_key = current_batch_keys[batch_id]
+                            clean_text = target_key.split("__grp")[0].split("__row")[0]
+                            for row_idx in title_to_indices[target_key]:
+                                df.at[row_idx, target_col] = opt_text
+                                df.at[row_idx, 'AI_Status'] = status
 
-                if i + batch_size < total_unique:
-                    time.sleep(sleep_time)
+                            if status == "Optimized":
+                                cursor.execute("""
+                                                    INSERT OR REPLACE INTO optimized_history 
+                                                    (user_id, original_input, optimized_title, platform, char_limit) 
+                                                    VALUES (?, ?, ?, ?, ?)
+                                                """, (user_id, clean_text, opt_text, platform, char_limit))
+                        conn.commit()
+                    else:
+                        log_msg = "⚡ 100% 缓存命中（零秒恢复）"
 
-        # --- 5. 单个文件处理完成 ---
-        final_stats = df['AI_Status'].value_counts()
-        yield f"📊 {fname} 处理完成！成功: {final_stats.get('Optimized', 0)} 条。"
-        processed_results.append((fname, df))
+                    yield df
+                    yield f"📝 {log_msg} | 进度: {min(i + batch_size, total_unique)}/{total_unique}"
+                    if i + batch_size < total_unique and batch_payload:
+                        time.sleep(sleep_time)
 
-    # --- 6. 全部结束信号 ---
-    yield "FINISH_SIGNAL"
-    yield processed_results
+                # 单个文件处理完成
+            final_stats = df['AI_Status'].value_counts()
+            yield f"📊 {fname} 处理完成！成功: {final_stats.get('Optimized', 0)} 条。"
+            processed_results.append((fname, df))
+
+            # --- 6. 全部文件处理结束信号 (放在循环外) ---
+        yield "FINISH_SIGNAL"
+        yield processed_results
+
+    except Exception as e:
+        # 捕获运行中的任何崩溃
+        yield f"❌ 任务运行出错: {str(e)}"
+
+    finally:
+        # --- 7. 无论如何，确保连接关闭 ---
+        conn.close()

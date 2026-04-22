@@ -7,6 +7,70 @@ import time
 import io
 import openpyxl
 import json
+import sqlite3
+import uuid
+import datetime
+# 获取当前脚本所在的绝对路径
+st.write(f"程序当前运行的目录是: {os.getcwd()}")
+st.write(f"程序尝试寻找数据库的路径是: {os.path.abspath('seo_master.db')}")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+db_path = os.path.join(BASE_DIR, "..", "seo_master.db")
+# --- 数据库基础函数 ---
+def init_db():
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    cursor = conn.cursor()
+    # 1. 用户表：增加密码、到期时间、SessionID
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password TEXT,
+            expiry_date DATE,
+            last_session_id TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+    # 2. 优化历史表：增加 user_id 隔离
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS optimized_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            original_input TEXT,
+            optimized_title TEXT,
+            platform TEXT,
+            char_limit INTEGER,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+init_db()  # 每次启动自动检查表结构
+
+
+def login_user(username, password):
+    conn = sqlite3.connect("seo_master.db")
+    cursor = conn.cursor()
+    # 校验账号密码及有效期
+    cursor.execute("""
+        SELECT user_id, expiry_date FROM users 
+        WHERE username = ? AND password = ? AND is_active = 1
+    """, (username, password))
+    user = cursor.fetchone()
+
+    if user:
+        u_id, expiry_str = user
+        expiry_date = datetime.datetime.strptime(expiry_str, '%Y-%m-%d').date()
+        if expiry_date >= datetime.date.today():
+            # 生成本次登录唯一的 Session ID
+            new_sid = str(uuid.uuid4())
+            cursor.execute("UPDATE users SET last_session_id = ? WHERE user_id = ?", (new_sid, u_id))
+            conn.commit()
+            conn.close()
+            return True, u_id, expiry_str, new_sid
+    conn.close()
+    return False, None, None, None
 
 # 设置路径
 root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,16 +101,39 @@ def stop_optimization():
     st.toast("正在请求停止任务...", icon="🛑")
 
 
-# ================= 权限校验 =================
+# ================= 权限校验 (SaaS 账号版) =================
 if 'authenticated' not in st.session_state: st.session_state.authenticated = False
+if 'user_id' not in st.session_state: st.session_state.user_id = None
+if 'session_id' not in st.session_state: st.session_state.session_id = None
+conn = sqlite3.connect("seo_master.db")
+test_res = conn.execute("SELECT * FROM users WHERE username = 'admin'").fetchone()
+st.write(f"调试信息 - 数据库中的admin记录: {test_res}")
+conn.close()
 if not st.session_state.authenticated:
-    st.title("🔐 软件授权验证")
-    auth_code = st.text_input("请输入卡密", type="password")
-    if st.button("立即登录"):
-        if auth_code == "888888":
+    st.title("🔐 跨境AI大师 - 成员登录")
+    col1, col2 = st.columns(2)
+    with col1:
+        u_name = st.text_input("账号")
+    with col2:
+        u_pwd = st.text_input("密码", type="password")
+
+    if st.button("立即登录", use_container_width=True):
+        is_ok, uid, expiry, sid = login_user(u_name, u_pwd)
+        if is_ok:
             st.session_state.authenticated = True
+            st.session_state.user_id = uid
+            st.session_state.username = u_name
+            st.session_state.session_id = sid
+            st.session_state.expiry_date = expiry
+            st.success(f"欢迎回来 {u_name}！权限有效期至: {expiry}")
             st.rerun()
+        else:
+            st.error("❌ 账号密码错误、已被禁用或已过期。")
+    st.info("💡 如需开通账号或续费，请联系管理员。")
     st.stop()
+
+# --- 顶部状态条 ---
+st.caption(f"👤 当前用户: {st.session_state.username} | 📅 到期时间: {st.session_state.expiry_date} | 🔑 状态: 独占登录中")
 
 # ================= 侧边栏 =================
 with st.sidebar:
@@ -205,6 +292,8 @@ with tab_seo:
                         sleep_time=sleep_time,
                         model_name=model_name,
                         base_url=base_url,
+                        user_id=st.session_state.user_id,  # <--- 关键：用户隔离
+                        current_sid=st.session_state.session_id,  # <--- 关键：防多端登录
                         use_deduplicate=use_deduplicate,
                         deduplicate_limit=deduplicate_limit,
                         temperature=user_temperature,

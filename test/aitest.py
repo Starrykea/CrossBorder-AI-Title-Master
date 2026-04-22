@@ -1,4 +1,3 @@
-# from google import genai
 # import os
 #
 # # --- 填入那个美国的 API Key ---
@@ -58,51 +57,50 @@ from openai import OpenAI
 #     print(response.choices[0].message.content)
 # except Exception as e:
 #     print(f"❌ 测试失败，错误详情：{e}")
-import google.generativeai as genai
 import os
 
 # ================= 配置区 =================
-# 请在此处填入你的 API Key
-API_KEY = "AIzaSyCIhGa2mct0Q9zdC6kGO2xD6mp9KeheBFI"
-# 指定模型
-MODEL_NAME = "gemini-2.5-flash"
-
+# # 请在此处填入你的 API Key
+# API_KEY = "AIzaSyCIhGa2mct0Q9zdC6kGO2xD6mp9KeheBFI"
+# # 指定模型
+# MODEL_NAME = "gemini-2.5-flash"
+#
 
 # ==========================================
 
-def test_gemini_connection():
-    print(f"正在尝试连接 {MODEL_NAME} 接口...")
-
-    # 1. 配置 API Key
-    genai.configure(api_key=API_KEY)
-
-    try:
-        # 2. 初始化模型
-        model = genai.GenerativeModel(MODEL_NAME)
-
-        # 3. 发起一个简单的文本请求
-        response = model.generate_content("你好，如果你收到了这条消息，请回复：接口调用正常。")
-
-        # 4. 输出结果
-        print("-" * 30)
-        print("测试成功！")
-        print(f"模型回复: {response.text}")
-        print("-" * 30)
-
-    except Exception as e:
-        print("-" * 30)
-        print("测试失败！请检查以下可能的原因：")
-        print(f"错误信息: {e}")
-        print("\n[排查提示]:")
-        print("1. 503 错误：服务器过载或 VPN 节点被拦截，请尝试更换美国/新加坡节点。")
-        print("2. 401 错误：API Key 无效。")
-        print("3. 403 错误：地区不受支持，请确认 VPN 已开启全局模式并切换至支持国家。")
-        print("-" * 30)
-
-
-if __name__ == "__main__":
-    test_gemini_connection()
-# import random
+# def test_gemini_connection():
+#     print(f"正在尝试连接 {MODEL_NAME} 接口...")
+#
+#     # 1. 配置 API Key
+#     genai.configure(api_key=API_KEY)
+#
+#     try:
+#         # 2. 初始化模型
+#         model = genai.GenerativeModel(MODEL_NAME)
+#
+#         # 3. 发起一个简单的文本请求
+#         response = model.generate_content("你好，如果你收到了这条消息，请回复：接口调用正常。")
+#
+#         # 4. 输出结果
+#         print("-" * 30)
+#         print("测试成功！")
+#         print(f"模型回复: {response.text}")
+#         print("-" * 30)
+#
+#     except Exception as e:
+#         print("-" * 30)
+#         print("测试失败！请检查以下可能的原因：")
+#         print(f"错误信息: {e}")
+#         print("\n[排查提示]:")
+#         print("1. 503 错误：服务器过载或 VPN 节点被拦截，请尝试更换美国/新加坡节点。")
+#         print("2. 401 错误：API Key 无效。")
+#         print("3. 403 错误：地区不受支持，请确认 VPN 已开启全局模式并切换至支持国家。")
+#         print("-" * 30)
+#
+#
+# if __name__ == "__main__":
+#     test_gemini_connection()
+# # import random
 #
 #
 # def generate_valid_upc():
@@ -123,3 +121,58 @@ if __name__ == "__main__":
 # # 生成 5 个测试用 UPC
 # for _ in range(218):
 #     print(generate_valid_upc())
+import sqlite3
+import os
+
+# 确保数据库路径正确
+db_path = "seo_master.db"
+
+
+def setup_admin():
+    # 1. 连接数据库（如果文件不存在会自动创建）
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    print("正在初始化数据库表结构...")
+    # 2. 创建用户表 (必须先执行这个！)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password TEXT,
+            expiry_date DATE,
+            last_session_id TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+
+    # 3. 创建历史记录表
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS optimized_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            original_input TEXT,
+            optimized_title TEXT,
+            platform TEXT,
+            char_limit INTEGER,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # 4. 插入管理员账号
+    print("正在创建管理员账号...")
+    try:
+        cursor.execute("""
+            INSERT INTO users (username, password, expiry_date) 
+            VALUES ('admin', '123456', '2026-12-31')
+        """)
+        conn.commit()
+        print("✅ 成功！账号: admin, 密码: 123456")
+    except sqlite3.IntegrityError:
+        print("⚠️ 提示：账号 'admin' 已经存在，无需重复插入。")
+
+    conn.close()
+
+
+if __name__ == "__main__":
+    setup_admin()
