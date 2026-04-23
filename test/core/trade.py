@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 import time
 import re
@@ -7,9 +9,12 @@ from openai import OpenAI
 import sqlite3
 import datetime
 # 定义版本号
-VERSION = "v2.5.2-Deduplicate"
+VERSION = "v2.5.3-Deduplicate"
 
-
+# --- 统一数据库路径 ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 强制指向 test 目录下的那个有数据的数据库
+db_path = os.path.abspath(os.path.join(BASE_DIR, "..", "seo_master.db"))
 def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, model_name, base_url,
                       is_retry=False, temperature=0, opt_mode="AI优化标题", negative_keywords=""):
     """
@@ -145,24 +150,40 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
     """
     任务分发函数：修复断点续传下的文件名丢失与结果合并问题
     """
-    conn = sqlite3.connect("seo_master.db", check_same_thread=False)
+    conn = sqlite3.connect(db_path, check_same_thread=False,timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     try:  # <--- 【必须添加 try 块】
         key_pool = itertools.cycle(api_keys)
         processed_results = []
         # --- 0. 权限与会话预检 ---
-        # 检查是否到期或被踢下线
         cursor = conn.cursor()
-        cursor.execute("SELECT expiry_date, last_session_id FROM users WHERE user_id = ?", (user_id,))
+        # 一次性查出：到期时间、SessionID、是否活跃 (is_active)
+        cursor.execute("SELECT expiry_date, last_session_id, is_active FROM users WHERE user_id = ?", (user_id,))
         user_info = cursor.fetchone()
 
         if not user_info:
             yield "❌ 用户不存在，任务终止"
             return
 
-        expiry_date_str, last_sid = user_info
+        # 一次性解构三个字段
+        expiry_date_str, last_sid, is_active = user_info
+
+        # 1. 检查是否被禁用
+        if is_active == 0:
+            yield "🛑 账号已被管理员禁用或注销，任务终止。"
+            return
+
+        # 2. 检查到期时间
         if datetime.datetime.strptime(expiry_date_str, '%Y-%m-%d').date() < datetime.date.today():
             yield "❌ 账号已过期，请续费后使用"
             return
+
+        # # 3. 检查 Session ID (防止多端登录)
+        # if last_sid != current_sid:
+        #     yield "🛑 检测到账号在别处登录，当前任务已安全停止。"
+        #     return
+
         yield f"🚀 引擎启动 | 用户ID: {user_id} | 模式: {opt_mode}"
 
         # 如果有断点数据，优先处理断点
@@ -248,9 +269,9 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                 for i in range(0, total_unique, batch_size):
                     # 【防多端登录校验】
                     cursor.execute("SELECT last_session_id FROM users WHERE user_id = ?", (user_id,))
-                    if cursor.fetchone()[0] != current_sid:
-                        yield "🛑 检测到账号在别处登录，当前任务已安全停止。"
-                        return  # 进入 finally 关闭连接
+                    # if cursor.fetchone()[0] != current_sid:
+                    #     yield "🛑 检测到账号在别处登录，当前任务已安全停止。"
+                    #     return  # 进入 finally 关闭连接
 
                     current_batch_keys = unique_keys[i: i + batch_size]
                     batch_payload = {}
@@ -273,6 +294,11 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                             batch_payload[b_idx] = raw_input
 
                     # 【调用 AI 引擎】
+                    total_count = len(current_batch_keys)
+                    cache_hit_count = total_count - len(batch_payload)
+
+                    if cache_hit_count > 0 and len(batch_payload) > 0:
+                        yield f"💾 缓存命中：已自动恢复 {cache_hit_count} 条记录，剩余 {len(batch_payload)} 条请求 AI..."
                     if batch_payload:
                         results, log_msg = ai_rewrite_engine(
                             id_titles_dict=batch_payload,  # 1. 这一批次的原始标题
@@ -297,11 +323,13 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                                 df.at[row_idx, 'AI_Status'] = status
 
                             if status == "Optimized":
+                                now_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
                                 cursor.execute("""
-                                                    INSERT OR REPLACE INTO optimized_history 
-                                                    (user_id, original_input, optimized_title, platform, char_limit) 
-                                                    VALUES (?, ?, ?, ?, ?)
-                                                """, (user_id, clean_text, opt_text, platform, char_limit))
+                                    INSERT OR REPLACE INTO optimized_history 
+                                    (user_id, original_input, optimized_title, platform, char_limit, timestamp) 
+                                    VALUES (?, ?, ?, ?, ?, ?)
+                                """, (user_id, clean_text, opt_text, platform, char_limit, now_time))
                         conn.commit()
                     else:
                         log_msg = "⚡ 100% 缓存命中（零秒恢复）"

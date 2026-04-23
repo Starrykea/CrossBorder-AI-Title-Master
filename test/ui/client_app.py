@@ -10,11 +10,11 @@ import json
 import sqlite3
 import uuid
 import datetime
-# # 获取当前脚本所在的绝对路径
-# st.write(f"程序当前运行的目录是: {os.getcwd()}")
-# st.write(f"程序尝试寻找数据库的路径是: {os.path.abspath('seo_master.db')}")
+# --- 统一数据库路径 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-db_path = os.path.join(BASE_DIR, "..", "seo_master.db")
+# 强制指向 test 目录下的那个有数据的数据库
+db_path = os.path.abspath(os.path.join(BASE_DIR, "..", "seo_master.db"))
+st.write(f"📢 系统正在使用唯一数据库: {db_path}")
 # --- 数据库基础函数 ---
 def init_db():
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -57,25 +57,48 @@ def manage_admin_and_history(conn, current_user_id, is_admin_mode=False):
     st.write("---")
     st.header("🛠️ 数据与账号管理")
 
-    # --- 功能一：个人历史管理 (所有人可见) ---
-    with st.expander("🗑️ 个人数据清理", expanded=False):
-        st.warning("注意：清空后，之前的标题优化记录将无法找回，重复优化将重新消耗 API 额度。")
-        if st.button("确认清空我的优化历史"):
-            cursor = conn.cursor()
-            # 开启 WAL 模式下删除也是安全的
-            cursor.execute("DELETE FROM optimized_history WHERE user_id = ?", (current_user_id,))
-            conn.commit()
-            st.success("您的个人优化历史已清空！")
+    # --- 功能一：个人足迹中心 (所有人可见) ---
+    with st.expander("📊 我的优化足迹与清理", expanded=True):
+        cursor = conn.cursor()
+        # 1. 先只查一个数字（开销极小）
+        cursor.execute("SELECT COUNT(*) FROM optimized_history WHERE user_id = ?", (current_user_id,))
+        my_count = cursor.fetchone()[0]
+
+        st.info(f"📈 您当前系统中有 **{my_count}** 条优化记录。")
+
+        # 2. 只有点击按钮才查询详情
+        if st.button("🔍 点击查询/刷新详细记录", key="btn_query_history"):
+            if my_count > 0:
+                st.write("📂 您的最近优化记录：")
+                history_sample = pd.read_sql_query(f"""
+                        SELECT original_input as '原始输入', optimized_title as '优化结果', timestamp as '时间'
+                        FROM optimized_history 
+                        WHERE user_id = {current_user_id} 
+                        ORDER BY timestamp DESC LIMIT 50
+                    """, conn)
+                st.dataframe(history_sample, width="stretch")
+            else:
+                st.warning("目前暂无详细记录。")
+
+        # 3. 清理逻辑（依然放在最下方）
+        if my_count > 0:
+            st.write("---")
+            st.caption("风险操作区")
+            confirm_delete = st.checkbox("我已确认：清空后，之前的优化缓存将彻底消失", key="del_confirm_user")
+            if st.button("🔥 清空我的专属缓存", disabled=not confirm_delete, type="primary"):
+                cursor.execute("DELETE FROM optimized_history WHERE user_id = ?", (current_user_id,))
+                conn.commit()
+                st.success("清理完成！")
+                st.rerun()
 
     # --- 功能二：超级管理员后台 (仅当密码正确时显示) ---
     if is_admin_mode:
         st.write("---")
         st.subheader("🌟 超级管理员控制台")
-        tab1, tab2, tab3 = st.tabs(["账号管理", "全局数据控制", "系统统计"])
+        tab1, tab2, tab3 = st.tabs(["账号管理", "数据穿透查询", "系统统计"])
 
         with tab1:
             st.write("### 用户增删改查")
-            # 新增用户表单
             with st.form("add_user_form", clear_on_submit=True):
                 col1, col2, col3 = st.columns(3)
                 new_u = col1.text_input("新账号")
@@ -89,19 +112,15 @@ def manage_admin_and_history(conn, current_user_id, is_admin_mode=False):
                             conn.commit()
                             st.success(f"账号 {new_u} 创建成功")
                         except Exception as e:
-                            st.error(f"创建失败: {e}")
-                    else:
-                        st.error("账号密码不能为空")
+                            st.error(f"失败: {e}")
 
-            # 用户列表展示
             users_df = pd.read_sql_query("SELECT user_id, username, expiry_date, is_active FROM users", conn)
-            st.dataframe(users_df, use_container_width=True)
+            st.dataframe(users_df, width="stretch")
 
-            # 删除用户逻辑
-            del_user_id = st.number_input("输入要删除的用户 ID", step=1, value=0)
-            if st.button("🔥 永久注销该用户"):
+            del_user_id = st.number_input("输入要注销的用户 ID", step=1, value=0, key="admin_del_id")
+            if st.button("🔥 永久注销该用户", type="secondary"):
                 if del_user_id == 1:
-                    st.error("系统保护：不能删除初始管理员账号！")
+                    st.error("不能删除主管理员！")
                 elif del_user_id > 0:
                     conn.execute("DELETE FROM users WHERE user_id = ?", (del_user_id,))
                     conn.commit()
@@ -109,21 +128,49 @@ def manage_admin_and_history(conn, current_user_id, is_admin_mode=False):
                     st.rerun()
 
         with tab2:
-            st.write("### 全局缓存管理")
-            st.error("危险操作：此功能将清空所有用户的优化记录（缓存），导致所有重复任务重新消耗API。")
-            if st.button("🚨 强制清空全库优化历史"):
-                conn.execute("DELETE FROM optimized_history")
-                conn.commit()
-                st.success("全库历史已彻底清空")
+            st.write("### 🔍 用户资产穿透查询")
+            target_uid = st.number_input("输入要查询的用户 ID", step=1, value=0, key="query_uid")
+            if target_uid > 0:
+                u_info = conn.execute("SELECT username FROM users WHERE user_id = ?", (target_uid,)).fetchone()
+                if u_info:
+                    u_count = \
+                    conn.execute("SELECT COUNT(*) FROM optimized_history WHERE user_id = ?", (target_uid,)).fetchone()[
+                        0]
+                    st.metric(f"用户 {u_info[0]} 的总记录数", f"{u_count} 条")
+
+                    if u_count > 0:
+                        u_detail = pd.read_sql_query(
+                            f"SELECT * FROM optimized_history WHERE user_id = {target_uid} LIMIT 10", conn)
+                        st.write("该用户最新的 10 条数据：")
+                        st.dataframe(u_detail, width="stretch")
+
+                        if st.button(f"🗑️ 单独清空该用户({u_info[0]})的记录"):
+                            conn.execute("DELETE FROM optimized_history WHERE user_id = ?", (target_uid,))
+                            conn.commit()
+                            st.success(f"{u_info[0]} 的数据已清理")
+                    else:
+                        st.info(f"用户 {u_info[0]} 目前没有历史记录。")
+                else:
+                    st.error("找不到该用户 ID")
 
         with tab3:
+            st.write("### 全局系统概览")
+            col_a, col_b = st.columns(2)
             total_history = conn.execute("SELECT COUNT(*) FROM optimized_history").fetchone()[0]
             total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            st.metric("系统总缓存条数", total_history)
-            st.metric("总注册用户数", total_users)
+            col_a.metric("系统总缓存条数", total_history)
+            col_b.metric("总注册用户数", total_users)
+
+            st.divider()
+            st.error("🚨 终极危险区")
+            if st.checkbox("我授权执行全库清空"):
+                if st.button("清空全库优化历史"):
+                    conn.execute("DELETE FROM optimized_history")
+                    conn.commit()
+                    st.success("全库已清零")
 
 def login_user(username, password):
-    conn = sqlite3.connect("seo_master.db")
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cursor = conn.cursor()
     # 校验账号密码及有效期
     cursor.execute("""
@@ -178,10 +225,6 @@ def stop_optimization():
 if 'authenticated' not in st.session_state: st.session_state.authenticated = False
 if 'user_id' not in st.session_state: st.session_state.user_id = None
 if 'session_id' not in st.session_state: st.session_state.session_id = None
-conn = sqlite3.connect("seo_master.db")
-test_res = conn.execute("SELECT * FROM users WHERE username = 'admin'").fetchone()
-st.write(f"调试信息 - 数据库中的admin记录: {test_res}")
-conn.close()
 if not st.session_state.authenticated:
     st.title("🔐 跨境AI大师 - 成员登录")
     col1, col2 = st.columns(2)
@@ -202,7 +245,7 @@ if not st.session_state.authenticated:
             st.rerun()
         else:
             st.error("❌ 账号密码错误、已被禁用或已过期。")
-    st.info("💡 如需开通账号或续费，请联系管理员。")
+    st.info("💡 如需开通账号，请联系管理员。")
     st.stop()
 
 # --- 顶部状态条 ---
@@ -440,7 +483,7 @@ with st.sidebar:
     with st.expander("🔐 管理员认证"):
         admin_token = st.text_input("超级管理员密钥", type="password", key="admin_key")
         # 建议把这里的密码改成你自己的私密字符串
-        is_admin = (admin_token == "你的超级密码888")
+        is_admin = (admin_token == "1194055104")
 
 # 2. 连接数据库并显示管理面板 (放在页面最底部)
 db_conn = sqlite3.connect(db_path, check_same_thread=False)
