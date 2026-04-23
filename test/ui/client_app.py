@@ -10,14 +10,17 @@ import json
 import sqlite3
 import uuid
 import datetime
-# 获取当前脚本所在的绝对路径
-st.write(f"程序当前运行的目录是: {os.getcwd()}")
-st.write(f"程序尝试寻找数据库的路径是: {os.path.abspath('seo_master.db')}")
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-db_path = os.path.join(BASE_DIR, "..", "seo_master.db")
+# # 获取当前脚本所在的绝对路径
+# st.write(f"程序当前运行的目录是: {os.getcwd()}")
+# st.write(f"程序尝试寻找数据库的路径是: {os.path.abspath('seo_master.db')}")
+# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# db_path = os.path.join(BASE_DIR, "..", "seo_master.db")
 # --- 数据库基础函数 ---
 def init_db():
     conn = sqlite3.connect(db_path, check_same_thread=False)
+    # 开启 WAL 模式 (特效药)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     cursor = conn.cursor()
     # 1. 用户表：增加密码、到期时间、SessionID
     cursor.execute("""
@@ -32,7 +35,7 @@ def init_db():
     """)
     # 2. 优化历史表：增加 user_id 隔离
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS optimized_history (
+            CREATE TABLE IF NOT EXISTS optimized_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             original_input TEXT,
@@ -48,6 +51,76 @@ def init_db():
 
 init_db()  # 每次启动自动检查表结构
 
+
+# --- 数据管理与超级后台函数 ---
+def manage_admin_and_history(conn, current_user_id, is_admin_mode=False):
+    st.write("---")
+    st.header("🛠️ 数据与账号管理")
+
+    # --- 功能一：个人历史管理 (所有人可见) ---
+    with st.expander("🗑️ 个人数据清理", expanded=False):
+        st.warning("注意：清空后，之前的标题优化记录将无法找回，重复优化将重新消耗 API 额度。")
+        if st.button("确认清空我的优化历史"):
+            cursor = conn.cursor()
+            # 开启 WAL 模式下删除也是安全的
+            cursor.execute("DELETE FROM optimized_history WHERE user_id = ?", (current_user_id,))
+            conn.commit()
+            st.success("您的个人优化历史已清空！")
+
+    # --- 功能二：超级管理员后台 (仅当密码正确时显示) ---
+    if is_admin_mode:
+        st.write("---")
+        st.subheader("🌟 超级管理员控制台")
+        tab1, tab2, tab3 = st.tabs(["账号管理", "全局数据控制", "系统统计"])
+
+        with tab1:
+            st.write("### 用户增删改查")
+            # 新增用户表单
+            with st.form("add_user_form", clear_on_submit=True):
+                col1, col2, col3 = st.columns(3)
+                new_u = col1.text_input("新账号")
+                new_p = col2.text_input("新密码")
+                new_d = col3.date_input("到期时间", value=datetime.date.today() + datetime.timedelta(days=30))
+                if st.form_submit_button("立即创建账号"):
+                    if new_u and new_p:
+                        try:
+                            conn.execute("INSERT INTO users (username, password, expiry_date) VALUES (?, ?, ?)",
+                                         (new_u, new_p, str(new_d)))
+                            conn.commit()
+                            st.success(f"账号 {new_u} 创建成功")
+                        except Exception as e:
+                            st.error(f"创建失败: {e}")
+                    else:
+                        st.error("账号密码不能为空")
+
+            # 用户列表展示
+            users_df = pd.read_sql_query("SELECT user_id, username, expiry_date, is_active FROM users", conn)
+            st.dataframe(users_df, use_container_width=True)
+
+            # 删除用户逻辑
+            del_user_id = st.number_input("输入要删除的用户 ID", step=1, value=0)
+            if st.button("🔥 永久注销该用户"):
+                if del_user_id == 1:
+                    st.error("系统保护：不能删除初始管理员账号！")
+                elif del_user_id > 0:
+                    conn.execute("DELETE FROM users WHERE user_id = ?", (del_user_id,))
+                    conn.commit()
+                    st.success(f"用户 ID {del_user_id} 已删除")
+                    st.rerun()
+
+        with tab2:
+            st.write("### 全局缓存管理")
+            st.error("危险操作：此功能将清空所有用户的优化记录（缓存），导致所有重复任务重新消耗API。")
+            if st.button("🚨 强制清空全库优化历史"):
+                conn.execute("DELETE FROM optimized_history")
+                conn.commit()
+                st.success("全库历史已彻底清空")
+
+        with tab3:
+            total_history = conn.execute("SELECT COUNT(*) FROM optimized_history").fetchone()[0]
+            total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            st.metric("系统总缓存条数", total_history)
+            st.metric("总注册用户数", total_users)
 
 def login_user(username, password):
     conn = sqlite3.connect("seo_master.db")
@@ -359,6 +432,27 @@ with tab_seo:
                     key=f"dl_{idx}",
                     use_container_width=True
                 )
+# ================= 这里是集成位置 =================
+
+# 1. 在侧边栏定义超级管理员的入口
+with st.sidebar:
+    st.divider()
+    with st.expander("🔐 管理员认证"):
+        admin_token = st.text_input("超级管理员密钥", type="password", key="admin_key")
+        # 建议把这里的密码改成你自己的私密字符串
+        is_admin = (admin_token == "你的超级密码888")
+
+# 2. 连接数据库并显示管理面板 (放在页面最底部)
+db_conn = sqlite3.connect(db_path, check_same_thread=False)
+# 开启 WAL 模式确保管理操作不锁死主任务
+db_conn.execute("PRAGMA journal_mode=WAL;")
+
+manage_admin_and_history(
+    db_conn,
+    st.session_state.user_id,
+    is_admin_mode=is_admin
+)
+db_conn.close()
 # --- TAB 2: Listing (同步 Mexico 命名与逻辑定位) ---
 with tab_listing:
     st.title("📦 自动化填充 (JSON+UPC)")
