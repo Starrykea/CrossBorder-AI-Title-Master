@@ -13,8 +13,8 @@ import datetime
 # # 获取当前脚本所在的绝对路径
 # st.write(f"程序当前运行的目录是: {os.getcwd()}")
 # st.write(f"程序尝试寻找数据库的路径是: {os.path.abspath('seo_master.db')}")
-# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# db_path = os.path.join(BASE_DIR, "..", "seo_master.db")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+db_path = os.path.join(BASE_DIR, "..", "seo_master.db")
 # --- 数据库基础函数 ---
 def init_db():
     conn = sqlite3.connect(db_path, check_same_thread=False)
