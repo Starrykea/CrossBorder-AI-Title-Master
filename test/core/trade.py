@@ -89,7 +89,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
         # 美克多逻辑：强调极简、严禁促销词、严格遵守介词规则
         platform_instruction = (
             f"你现在是【美克多 Mercado Libre】官方上架专家。要求如下：\n"
-            f"1. **极致极简**：严格控制在 {char_limit} 字符内，删除原标题的尺寸/尺码属性。\n"
+            f"1. **极致极简与尺寸清空**：严格控制在 {char_limit} 字符内。**必须彻底删除所有尺寸、尺码、规格参数**（例如：严禁出现 '13-17 inch', '40x40cm', 'Size S/M/L', '10.5mm' 等）。\n"
             f"2. **类目规则**：‘手机/平板配件’类目手机前面必须加 'for '，其他类目严禁出现 'for'。\n"
             f"3. **符号硬指标**：**严禁使用任何逗号、分号或特殊符号**，仅允许空格。\n"
             f"4. **多样化与结构打乱**：随机切换以下四种重心，确保句式不雷同：\n"
@@ -99,6 +99,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"     * 重心D (数量优先): [数量词变体] + [属性] + [核心词] + [功能]\n"
             f"5. **数量与属性保护（核心原则）**：\n"
             f"   - **禁止虚构数量**：如果原标题中没有明确提及 '2pcs/1 pair/Set' 等数量，严禁在优化标题中添加任何数量词。\n"
+            f"   - **禁止数字残留**：除数量词外，标题中不应出现任何代表长宽高的数字。\n"
             f"   - **同义词替换**：仅当原标题包含数量时，才可随机交替使用同义词（如将 2pcs 替换为 2-Pack 或 Set of 2）。\n"
             f"   - **必须保留**：颜色(Color)、材质(Material)或图案(Pattern)。删除无意义的 '1pc'。\n"
         )
