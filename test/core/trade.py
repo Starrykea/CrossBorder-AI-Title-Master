@@ -1,3 +1,4 @@
+import gc
 import os
 
 import pandas as pd
@@ -5,11 +6,18 @@ import time
 import re
 import itertools
 import io
+
+import psutil
 from openai import OpenAI
 import sqlite3
 import datetime
 # 定义版本号
 VERSION = "v2.5.3-Deduplicate"
+
+def get_memory_info():
+    process = psutil.Process(os.getpid())
+    mem_mb = process.memory_info().rss / 1024 / 1024  # 转换为 MB
+    return mem_mb
 
 # --- 统一数据库路径 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -316,7 +324,17 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                             opt_mode=opt_mode,  # 10. 模式
                             negative_keywords=negative_keywords  # 11. 违禁词
                         ) # 此处传入你的参数
+                        # ============= 新增内存监控逻辑 =============
+                        current_mem = get_memory_info()
+                        # 实时打印到控制台（运维看）
+                        print(f"DEBUG: 用户 {user_id} 进度 {i}/{total_unique} | 内存: {current_mem:.2f} MB")
 
+                        # 实时反馈给前端（你朋友看）
+                        # 如果内存超过 400MB (512MB机器的红线)，给予警告
+                        if current_mem > 400:
+                            yield f"⚠️ 系统内存警告: {current_mem:.0f}MB / 512MB。检测到内存极高，正在尝试清理..."
+                            gc.collect()  # 强制执行垃圾回收
+                        # ==========================================
                         # 回填并存入数据库
                         for batch_id, (opt_text, status) in results.items():
                             target_key = current_batch_keys[batch_id]
