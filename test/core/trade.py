@@ -220,33 +220,35 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                 fname = fname_raw
                 yield f"📂 正在读取: {fname}"
                 try:
-                    # --- 优化后的读取逻辑 ---
                     if fname.lower().endswith(('.xlsx', '.xls')):
-                        # 显式处理 Excel，增加对多 Sheet 的容错
                         sheet_to_read = selected_sheet if selected_sheet else 0
                         df = pd.read_excel(file_source, sheet_name=sheet_to_read)
                     else:
-                        # 针对 CSV 的多重编码重试机制
-                        try:
-                            # 首先尝试 utf-8-sig (能自动处理带 BOM 的文件)
-                            file_source.seek(0)
-                            df = pd.read_csv(file_source, encoding='utf-8-sig')
-                        except UnicodeDecodeError:
-                            try:
-                                # 失败则尝试 GBK (解决你朋友遇到的那个报错)
-                                file_source.seek(0)
-                                df = pd.read_csv(file_source, encoding='gbk')
-                            except Exception:
-                                # 最后的防线：尝试 utf-8
-                                file_source.seek(0)
-                                df = pd.read_csv(file_source, encoding='utf-8')
+                        # 定义一个尝试顺序，gb18030 兼容性比 gbk 更强
+                        encodings_to_try = ['utf-8-sig', 'gb18030', 'utf-8']
+                        df = None
+                        last_err = None
 
-                    # 清理数据：去掉全空的行，防止 AI 浪费额度处理空行
+                        for enc in encodings_to_try:
+                            try:
+                                file_source.seek(0)  # 每次尝试前务必归零指针
+                                df = pd.read_csv(file_source, encoding=enc)
+                                # print(f"成功使用 {enc} 读取文件") # 调试用
+                                break
+                            except Exception as e:
+                                last_err = e
+                                continue
+
+                        if df is None:
+                            raise Exception(f"所有常用编码(UTF8/GBK)均无法解析: {last_err}")
+
+                    # 清理数据
                     df = df.dropna(axis=1, how='all').dropna(axis=0, how='all')
                     df = df.reset_index(drop=True)
+
                 except Exception as e:
-                    # 这里的报错会更清晰地显示在你的日志 UI 里
-                    yield f"❌ 读取失败: {str(e)}"
+                    # 使用 f-string 配合 repr(e) 有时能看到更底层的报错原因
+                    yield f"❌ 读取失败: {repr(e)}"
                     continue
 
             # 成功后的后续逻辑...
