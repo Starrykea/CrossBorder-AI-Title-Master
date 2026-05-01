@@ -168,7 +168,14 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
         key_pool = itertools.cycle(api_keys)
         processed_results = []
         # --- 0. 权限与会话预检 ---
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("ALTER TABLE optimized_history ADD COLUMN opt_mode TEXT")
+            cursor.execute("ALTER TABLE optimized_history ADD COLUMN language TEXT")  # 顺便把语言也加上
+            conn.commit()
+        except sqlite3.OperationalError:
+            # 说明列已经存在了，直接跳过
+            pass
         # 一次性查出：到期时间、SessionID、是否活跃 (is_active)
         cursor.execute("SELECT expiry_date, last_session_id, is_active FROM users WHERE user_id = ?", (user_id,))
         user_info = cursor.fetchone()
@@ -194,7 +201,6 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
         # if last_sid != current_sid:
         #     yield "🛑 检测到账号在别处登录，当前任务已安全停止。"
         #     return
-
         yield f"🚀 引擎启动 | 用户ID: {user_id} | 模式: {opt_mode}"
 
         # 如果有断点数据，优先处理断点
@@ -204,46 +210,90 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
             files_to_process = [(f.name, f) for f in uploaded_files] if uploaded_files else []
 
         for fname_raw, file_source in files_to_process:
+            df = None  # 每一轮开始前强制重置，防止上一个文件的数据污染
             # --- 1. 数据载入与文件名恢复 ---
             if fname_raw == "BUFFER_TASK":
                 df = file_source
-                # 尝试从 st.session_state 恢复文件名，否则给个默认带后缀的名字
                 fname = "Recovered_Task.xlsx"
                 yield f"🔄 正在从断点恢复任务..."
             else:
                 fname = fname_raw
                 yield f"📂 正在读取: {fname}"
                 try:
-                    if fname.endswith(('.xlsx', '.xls')):
+                    # --- 优化后的读取逻辑 ---
+                    if fname.lower().endswith(('.xlsx', '.xls')):
+                        # 显式处理 Excel，增加对多 Sheet 的容错
                         sheet_to_read = selected_sheet if selected_sheet else 0
-                        content = pd.read_excel(file_source, sheet_name=sheet_to_read)
-                        df = content[selected_sheet] if isinstance(content, dict) else content
+                        df = pd.read_excel(file_source, sheet_name=sheet_to_read)
                     else:
-                        file_source.seek(0)
-                        df = pd.read_csv(file_source, encoding='utf-8-sig')
+                        # 针对 CSV 的多重编码重试机制
+                        try:
+                            # 首先尝试 utf-8-sig (能自动处理带 BOM 的文件)
+                            file_source.seek(0)
+                            df = pd.read_csv(file_source, encoding='utf-8-sig')
+                        except UnicodeDecodeError:
+                            try:
+                                # 失败则尝试 GBK (解决你朋友遇到的那个报错)
+                                file_source.seek(0)
+                                df = pd.read_csv(file_source, encoding='gbk')
+                            except Exception:
+                                # 最后的防线：尝试 utf-8
+                                file_source.seek(0)
+                                df = pd.read_csv(file_source, encoding='utf-8')
+
+                    # 清理数据：去掉全空的行，防止 AI 浪费额度处理空行
+                    df = df.dropna(axis=1, how='all').dropna(axis=0, how='all')
+                    df = df.reset_index(drop=True)
                 except Exception as e:
-                    yield f"❌ 读取失败: {e}"
+                    # 这里的报错会更清晰地显示在你的日志 UI 里
+                    yield f"❌ 读取失败: {str(e)}"
                     continue
 
-            # --- 2. 标题列定位 ---
-            target_col = next(
-                (c for c in df.columns if any(k in str(c).lower() for k in ['标题', 'title', 'name', '商品名称', '名称'])),
-                None)
+            # 成功后的后续逻辑...
+            yield f"✅ 成功载入 {len(df)} 条数据"
+            # --- 2. 标题列定位 (严格表头模式) ---
+            target_col = None
+            # 定义你认可的“标题”关键字
+            title_keywords = ['标题', 'title', 'name', '商品名称', '名称']
 
-            if not target_col:
-                yield f"⚠️ 找不到标题列，跳过 {fname}"
-                continue
+            # 遍历所有列名，按顺序查找
+            for col_name in df.columns:
+                # 转换为字符串并清理空格
+                clean_name = str(col_name).strip().lower()
 
+                # 核心判断：如果列名包含关键字，且【不是】自动生成的 Unnamed
+                if any(k in clean_name for k in title_keywords) and "unnamed" not in clean_name:
+                    target_col = col_name
+                    break  # 找到第一个符合条件的就停下
+
+            # --- 最终判定 ---
+            if target_col:
+                yield f"✅ 已锁定标题列: {target_col}"
+            else:
+                # 如果全表扫完都没有匹配的非空表头
+                yield "❌ 错误：未能在表格中找到有效的【标题】列，任务终止。"
+                return  # 直接结束函数，不再往下跑
             if 'AI_Status' not in df.columns:
                 df['AI_Status'] = "Pending"
-
+            else:
+                df['AI_Status'] = df['AI_Status'].fillna("Pending").astype(str)
             # 内部函数：处理列组合输入
             def prepare_input(row):
-                original_title = str(row[target_col]).strip()
+                val = row.get(target_col, "")
+                original_title = str(val).strip() if pd.notna(val) else ""
+                # 如果原标题是空的，AI 也没法优化，后面会跳过
+                if not original_title or original_title.lower() == 'nan':
+                    return ""
                 if opt_mode == "列组合优化" and selected_extra_cols:
                     # 过滤掉 nan 值并拼接
-                    extra_info = " ".join(
-                        [str(row[col]).strip() for col in selected_extra_cols if str(row[col]).lower() != 'nan'])
+                    extra_parts = []
+                    for col in selected_extra_cols:
+                        # 确保只合并存在的列，且排除 nan
+                        if col in row and pd.notna(row[col]):
+                            c_val = str(row[col]).strip()
+                            if c_val.lower() != 'nan' and c_val != "":
+                                extra_parts.append(c_val)
+                    extra_info = " ".join(extra_parts)
                     return f"[原标题]: {original_title} | [附加关键词]: {extra_info}"
                 return original_title
 
@@ -292,8 +342,12 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                         raw_input = k.split("__grp")[0].split("__row")[0]
                         cursor.execute("""
                                             SELECT optimized_title FROM optimized_history 
-                                            WHERE user_id = ? AND original_input = ? AND platform = ? AND char_limit = ?
-                                        """, (user_id, raw_input, platform, char_limit))
+                                            WHERE user_id = ? 
+                                            AND original_input = ? 
+                                            AND platform = ? 
+                                            AND char_limit = ?
+                                            AND opt_mode = ?
+                                        """, (user_id, raw_input, platform, char_limit,opt_mode))
                         cache = cursor.fetchone()
 
                         if cache:
@@ -348,9 +402,9 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
 
                                 cursor.execute("""
                                     INSERT OR REPLACE INTO optimized_history 
-                                    (user_id, original_input, optimized_title, platform, char_limit, timestamp) 
-                                    VALUES (?, ?, ?, ?, ?, ?)
-                                """, (user_id, clean_text, opt_text, platform, char_limit, now_time))
+                                    (user_id, original_input, optimized_title, platform, char_limit,opt_mode, timestamp) 
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (user_id, clean_text, opt_text, platform, char_limit,opt_mode, now_time))
                         conn.commit()
                     else:
                         log_msg = "⚡ 100% 缓存命中（零秒恢复）"

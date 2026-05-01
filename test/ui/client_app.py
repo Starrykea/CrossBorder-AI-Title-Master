@@ -42,6 +42,8 @@ def init_db():
             optimized_title TEXT,
             platform TEXT,
             char_limit INTEGER,
+            opt_mode TEXT,      -- 👈 新增：区分优化模式
+            language TEXT,      -- 👈 新增：区分语言
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -71,7 +73,7 @@ def manage_admin_and_history(conn, current_user_id, is_admin_mode=False):
             if my_count > 0:
                 st.write("📂 您的最近优化记录：")
                 history_sample = pd.read_sql_query(f"""
-                        SELECT original_input as '原始输入', optimized_title as '优化结果', timestamp as '时间'
+                        SELECT original_input as '原始输入', optimized_title as '优化结果', opt_mode as '模式', timestamp as '时间'
                         FROM optimized_history 
                         WHERE user_id = {current_user_id} 
                         ORDER BY timestamp DESC LIMIT 50
@@ -309,6 +311,28 @@ with tab_seo:
     st.title("🚀 AI 标题优化引擎")
     selected_sheet = None
     selected_extra_cols = []
+    # --- 新增/优化：一键清理按钮 ---
+    # 我们使用一个大红色的按钮，并增加二次确认逻辑（或者直接重置）
+    if st.session_state.optimization_done or st.session_state.current_df is not None or st.session_state.process_logs:
+        if st.button("🗑️ 一键清空任务、日志与断点", use_container_width=True, type="secondary"):
+            # 1. 重置任务状态
+            st.session_state.optimization_done = False
+            st.session_state.is_running = False
+
+            # 2. 清空核心数据（断点和结果）
+            st.session_state.current_df = None  # 清除断点备份的 DataFrame
+            st.session_state.final_results = []  # 清除待下载的结果列表
+
+            # 3. 清空界面反馈
+            st.session_state.process_logs = []  # 清除运行日志
+
+            # 4. 强制清理缓存（可选，防止上传组件残留文件名）
+            st.cache_resource.clear()
+
+            # 提示并刷新页面
+            st.toast("已彻底清理所有任务数据", icon="🧹")
+            time.sleep(0.5)
+            st.rerun()
     if st.session_state.optimization_done:
         if st.button("🗑️ 清空所有结果与日志", use_container_width=True):
             st.session_state.optimization_done = False
@@ -316,6 +340,7 @@ with tab_seo:
             st.session_state.final_results = []
             st.session_state.process_logs = []
             st.session_state.current_df = None
+            st.cache_resource.clear()
             st.rerun()
 
     uploaded_files = st.file_uploader("上传待处理文件", type=['xlsx', 'csv'], accept_multiple_files=True)
@@ -441,40 +466,52 @@ with tab_seo:
 
     # --- 处理完成后的下载展示区 ---
     if st.session_state.optimization_done:
+        st.divider()  # 加一条分割线，视觉上更清晰
         st.subheader("✅ 优化结果清单预览")
+
+        # 日志区增加“自动滚动到最新”感官
         with st.expander("📝 查看本次执行完整日志", expanded=False):
             st.code("\n".join(st.session_state.process_logs), language="bash")
 
-        d_cols = st.columns(3)
-        for idx, (f_name, df_res) in enumerate(st.session_state.final_results):
-            with d_cols[idx % 3]:
-                # 判断原始文件格式
-                is_csv = f_name.lower().endswith('.csv')
+        # 结果展示
+        if not st.session_state.final_results:
+            st.info("暂无处理结果。")
+        else:
+            st.markdown(f"**共计处理完成 {len(st.session_state.final_results)} 个文件**")
+            d_cols = st.columns(3)
 
-                if is_csv:
-                    # CSV 处理逻辑：使用 utf-8-sig 防止西语/中文乱码
-                    download_data = df_res.to_csv(index=False).encode('utf-8-sig')
-                    mime_type = "text/csv"
-                    final_name = f"Opt_{f_name}"
-                else:
-                    # Excel 处理逻辑：使用 BytesIO 构建二进制流
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                        df_res.to_excel(writer, index=False, sheet_name='Sheet1')
-                    download_data = buffer.getvalue()
-                    mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    # 确保后缀名正确
-                    base_name = f_name.rsplit('.', 1)[0]
-                    final_name = f"Opt_{base_name}.xlsx"
+            for idx, (f_name, df_res) in enumerate(st.session_state.final_results):
+                with d_cols[idx % 3]:
+                    # 使用 os.path 提取文件名，比 rsplit 更稳健
+                    base_name, ext = os.path.splitext(f_name)
+                    is_csv = ext.lower() == '.csv'
 
-                st.download_button(
-                    label=f"📥 下载 {f_name}",
-                    data=download_data,
-                    file_name=final_name,
-                    mime=mime_type,
-                    key=f"dl_{idx}",
-                    use_container_width=True
-                )
+                    try:
+                        if is_csv:
+                            # CSV 处理：utf-8-sig 是为了让 Excel 打开时不乱码（特别是西语特殊字符）
+                            download_data = df_res.to_csv(index=False, encoding='utf-8-sig')
+                            mime_type = "text/csv"
+                            final_name = f"Opt_{base_name}.csv"
+                        else:
+                            # Excel 处理
+                            buffer = io.BytesIO()
+                            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                                df_res.to_excel(writer, index=False, sheet_name='Optimized')
+                            download_data = buffer.getvalue()
+                            mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            final_name = f"Opt_{base_name}.xlsx"
+
+                        st.download_button(
+                            label=f"📥 下载 {f_name}",
+                            data=download_data,
+                            file_name=final_name,
+                            mime=mime_type,
+                            key=f"dl_{idx}",
+                            use_container_width=True
+                        )
+                    except Exception as e:
+                        st.error(f"构建下载文件失败: {base_name}")
+
 # ================= 这里是集成位置 =================
 
 # 1. 在侧边栏定义超级管理员的入口
