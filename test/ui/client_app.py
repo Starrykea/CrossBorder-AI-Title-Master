@@ -272,17 +272,35 @@ with st.sidebar:
         placeholder="例如: Best, Cheap, Nike, Medical",
         help="AI在优化标题时会严格避开这些词汇"
     )
-    engine_type = st.selectbox("AI 引擎", ["Google Gemini", "DeepSeek"])
-    default_url = "https://generativelanguage.googleapis.com/v1beta/openai/" if engine_type == "Google Gemini" else "https://api.deepseek.com"
+    engine_type = st.selectbox("AI 引擎", ["Google Gemini", "DeepSeek", "OpenAI GPT"])
+
+    # 2. 根据引擎动态计算默认 URL
+    if engine_type == "Google Gemini":
+        default_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    elif engine_type == "DeepSeek":
+        default_url = "https://api.deepseek.com"
+    else:  # OpenAI GPT
+        default_url = "https://api.openai.com/v1"
+
     base_url = st.text_input("API URL", value=default_url)
 
+    # 3. 根据引擎动态切换模型选择
     if engine_type == "Google Gemini":
         gemini_opts = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
         sel_m = st.selectbox("模型切换", gemini_opts, index=0)
         model_name = st.text_input("当前模型名称", value=sel_m)
-    else:
-        model_name = st.text_input("当前模型名称", value="deepseek-chat")
 
+    elif engine_type == "DeepSeek":
+        model_opts = ["deepseek-chat", "deepseek-reasoner"]
+        sel_m = st.selectbox("模型切换", model_opts, index=0)
+        model_name = st.text_input("当前模型名称", value=sel_m)
+
+    else:  # OpenAI GPT
+        gpt_opts = ["gpt-4o", "gpt-4o-mini", "o1-mini", "gpt-4-turbo"]
+        sel_m = st.selectbox("模型切换", gpt_opts, index=0)
+        model_name = st.text_input("当前模型名称", value=sel_m)
+
+    # 4. Key 接收区域
     raw_keys = st.text_area("🔑 Keys (每行一个)", height=100)
     user_keys = [k.strip() for k in raw_keys.split('\n') if k.strip()]
 
