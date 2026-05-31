@@ -23,21 +23,36 @@ def get_memory_info():
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 强制指向 test 目录下的那个有数据的数据库
 db_path = os.path.abspath(os.path.join(BASE_DIR, "..", "seo_master.db"))
+
+
 def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, model_name, base_url,
                       is_retry=False, temperature=0, opt_mode="AI优化标题", negative_keywords=""):
     """
-    核心优化引擎：逻辑保持不变
+    核心优化引擎：逻辑完全保持不变，仅修复违禁词，去除 self 错误引用
     """
+    import re
+    import time
+    from openai import OpenAI  # 确保安全导入
+
     if not id_titles_dict:
         return {}, "Empty"
 
     input_payload = "\n".join([f"#{k}: {v}" for k, v in id_titles_dict.items()])
+
+    # ─── 🛠️ 1. 违禁词指令解析（保持原生结构，仅增强提取） ───
+    neg_instruction = ""
+    neg_warning_flat = ""
+    if negative_keywords and negative_keywords.strip():
+        clean_neg_words = [w.strip() for w in negative_keywords.replace("，", ",").split(",") if w.strip()]
+        if clean_neg_words:
+            formatted_words = ", ".join([f"'{w}'" for w in clean_neg_words])
+            neg_instruction = f"\n❌ **绝对禁止出现的词汇**：{negative_keywords} (严禁在任何情况下使用这些词)"
+            neg_warning_flat = f"（绝对禁止包含违禁词：{formatted_words}）"
+
     retry_warning = ""
     if is_retry:
         retry_warning = f"\n⚠️ [重要] 之前的尝试依然超长，包含空格必须在 {char_limit} 字符以内，确保达标！"
-    neg_instruction = ""
-    if negative_keywords and negative_keywords.strip():
-        neg_instruction = f"\n❌ **绝对禁止出现的词汇**：{negative_keywords} (严禁在任何情况下使用这些词)"
+
     mode_instruction = ""
     if opt_mode == "列组合优化":
         mode_instruction = (
@@ -47,8 +62,9 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
         )
     else:
         mode_instruction = "3. **SEO优化要求**：对原标题进行语义精简，提取核心卖点，提升点击率。"
+
+    # ─── 🛠️ 2. 平台规则判断（内部每一句文案完全保持你原本的逻辑） ───
     if "乐天" in platform or "Rakuten.fr" in platform.lower():
-        # 乐天逻辑：强调 SEO 堆砌、长尾词、允许特定符号
         platform_instruction = (
             f"你现在是【乐天 Rakuten】SEO专家。要求如下：\n"
             f"1. **SEO最大化**：乐天流量高度依赖关键词。请在 {char_limit} 字符内尽量填满核心词及相关长尾词。删除原标题中的具体尺寸属性（如 30x40cm）。\n"
@@ -66,7 +82,6 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"{mode_instruction}\n"
         )
     elif "noon" in platform.lower() or "波兰" in platform:
-        # 波兰 Allegro 逻辑：强调标题可读性、核心词置前、语法地道
         platform_instruction = (
             f"你现在是【波兰 noon 平台】SEO 专家。要求如下：\n"
             f"1. **核心布局**：波兰语单词较长，必须严格在 {char_limit} 字符内。**核心产品词必须置于标题最前面**。删除原标题中的具体尺寸/尺码（如 30x40cm 等）。\n"
@@ -83,7 +98,6 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"{mode_instruction}\n"
         )
     elif "allegro" in platform.lower() or "波兰" in platform:
-        # 波兰 Allegro 逻辑：极致强调首位核心词，处理波兰语长单词
         platform_instruction = (
             f"你现在是【波兰 Allegro 官方 SEO 专家】。请严格遵守以下平台硬性规则：\n"
             f"1. **首位词原则**：**标题的第一个词必须是产品的核心名词**（如：Etui, Lampa, Uchwyt）。严禁以形容词、品牌名或促销词开头。\n"
@@ -94,7 +108,6 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"{mode_instruction}\n"
         )
     else:
-        # 美克多逻辑：强调极简、严禁促销词、严格遵守介词规则
         platform_instruction = (
             f"你现在是【美克多 Mercado Libre】官方上架专家。要求如下：\n"
             f"1. **极致极简与尺寸清空**：严格控制在 {char_limit} 字符内。**必须彻底删除所有尺寸、尺码、规格参数**（例如：严禁出现 '13-17 inch', '40x40cm', 'Size S/M/L', '10.5mm' 等）。\n"
@@ -111,18 +124,27 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"   - **同义词替换**：仅当原标题包含数量时，才可随机交替使用同义词（如将 2pcs 替换为 2-Pack 或 Set of 2）。\n"
             f"   - **必须保留**：颜色(Color)、材质(Material)或图案(Pattern)。删除无意义的 '1pc'。\n"
         )
+
     common_rules = (
         f"6. **列组合约束**：{'必须完整保留 [附加关键词] 内容，不得删减。' if opt_mode == '列组合优化' else '精简非核心修饰词。'}"
     )
 
+    # ─── 🛠️ 3. Prompt 组装与 System 动态注入（增加禁词双层把控） ───
     prompt = (
         f"{platform_instruction}\n"
         f"{common_rules}\n"
         f"语言要求：{language}，句子要纯正语言，包括介词也要用相对应的语言\n"
-        f"{neg_instruction}\n"  # <--- 禁词指令放在显眼位置
+        f"{neg_instruction}\n"  # 保持原位
         f"格式要求：只返回 '#ID: 结果'，每行一条。\n"
         f"待处理数据：\n{input_payload}\n{retry_warning}"
     )
+
+    system_content = "Professional SEO expert. Strictly follows char limits."
+    if neg_warning_flat:
+        # 如果有违禁词，强行打到 System 大脑神经元上
+        system_content += f" CRITICAL RULE: Under NO circumstances are you allowed to use these words: {neg_warning_flat}."
+
+    # ─── 🛠️ 4. 循环调用与接口提取逻辑 ───
     for attempt in range(1, 4):
         try:
             current_key = next(key_pool)
@@ -130,7 +152,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[
-                    {"role": "system", "content": "Professional SEO expert. Strictly follows char limits."},
+                    {"role": "system", "content": system_content},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=temperature,
@@ -145,6 +167,15 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
                 u_id = int(m_id)
                 optimized_text = " ".join(m_content.strip().replace(',', ' ').split())
                 status = "Optimized" if len(optimized_text) <= char_limit else "Retry_Needed"
+
+                # ─── 🛡️ 唯一核心进化：本地代码级防护盾（已去除 self 引用，改为标准 print） ───
+                if negative_keywords and negative_keywords.strip():
+                    for word in clean_neg_words:
+                        if word.lower() in optimized_text.lower():
+                            status = "Retry_Needed"  # 抓到违禁词，强行拦截打入重试队列
+                            print(f"⚠️ [探针警报] 拦截到 AI 标题 #{u_id} 中漏出违禁词 '{word}'，已强行打回重试！")
+                            break
+
                 if status == "Optimized": success_count += 1
                 batch_results[u_id] = (optimized_text, status)
 
