@@ -104,7 +104,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"2. **字符约束**：总长度严格控制在 {char_limit} 字符内（含空格）。请优先保留核心属性，删减无意义修饰词，删除原标题的尺寸/尺码属性。\n"
             f"3. **纯净格式**：禁止出现任何特殊符号（如：- , / * +），仅允许使用空格。不要使用所有字母大写。\n"
             f"4. **地道语法**：确保语法符合当地语言习惯，适配描述统一使用 'do [Model]' 格式。\n"
-            f"5. **属性保护**：删除 '1 szt. '，如果本身有 '2 szt.' 以上套装属性，则保留下来，如果没有不要随便添加。必须保留颜色(Color)、材质(Material)或图案(Pattern)。\n"
+            f"5. **属性保护**：删除 '1 szt. '或'1pc'，如果本身有 '2 szt. 以上套装属性，则保留下来，如果没有不要随便添加。必须保留颜色(Color)、材质(Material)或图案(Pattern)。\n"
             f"{mode_instruction}\n"
         )
     else:
