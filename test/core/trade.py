@@ -11,13 +11,16 @@ import psutil
 from openai import OpenAI
 import sqlite3
 import datetime
+
 # 定义版本号
-VERSION = "v2.5.3-Deduplicate"
+VERSION = "v2.5.4-FilterRows"
+
 
 def get_memory_info():
     process = psutil.Process(os.getpid())
     mem_mb = process.memory_info().rss / 1024 / 1024  # 转换为 MB
     return mem_mb
+
 
 # --- 统一数据库路径 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -77,7 +80,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
             f"     * 重心D (数量优先): [数量词] + [属性] + [核心词] + [功能] (注：仅当原标题明确包含数量时使用)\n"
             f"5. **数量与属性保护（红线原则）**：\n"
             f"   - **严禁无中生有**：如果原标题未提及数量，绝对禁止在优化标题中添加任何数量词（如 2pcs, 2 pièces, Set 等）。\n"
-            f"   - **同义词替换**：仅在原标题已有数量时，才允许从 (2pcs, 2-Pack, Lot de 2, Lot de 2 pièces) 中随机选择。否则必须忽略。\n"
+            f"   - **同义词替换**：仅在原标题已有数量时，才允许从 (2pcs, 2-Pack, Lot de 2, Lot de 2 pièces) 中随机选择。否则必须忽略。 \n"
             f"   - **精准保留**：删除 '1 pièce'。必须保留颜色(Color)、材质(Material)或图案(Pattern)。\n"
             f"{mode_instruction}\n"
         )
@@ -168,7 +171,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
                 optimized_text = " ".join(m_content.strip().replace(',', ' ').split())
                 status = "Optimized" if len(optimized_text) <= char_limit else "Retry_Needed"
 
-                # ─── 🛡️ 唯一核心进化：本地代码级防护盾（已去除 self 引用，改为标准 print） ───
+                # ─── 🛡️ 唯一核心进化：本地代码级防护盾（已去除 self 引用，改为 standard print） ───
                 if negative_keywords and negative_keywords.strip():
                     for word in clean_neg_words:
                         if word.lower() in optimized_text.lower():
@@ -187,27 +190,29 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
 
 
 def start_optimization_task(uploaded_files, platform, char_limit, language, api_keys, batch_size, sleep_time,
-                            model_name, base_url, user_id,current_sid,use_deduplicate=True, deduplicate_limit=99, temperature=0.7,
-                            existing_df=None, opt_mode="AI优化标题", selected_extra_cols=None, selected_sheet=None,negative_keywords=None):
+                            model_name, base_url, user_id, current_sid, use_deduplicate=True, deduplicate_limit=99,
+                            temperature=0.7,
+                            existing_df=None, opt_mode="AI优化标题", selected_extra_cols=None, selected_sheet=None,
+                            negative_keywords=None,
+                            delete_negative_rows=False):  # 🎯 核心新增参数：delete_negative_rows 控制开关
     """
     任务分发函数：修复断点续传下的文件名丢失与结果合并问题
     """
-    conn = sqlite3.connect(db_path, check_same_thread=False,timeout=30)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    try:  # <--- 【必须添加 try 块】
+    try:
         key_pool = itertools.cycle(api_keys)
         processed_results = []
         # --- 0. 权限与会话预检 ---
         try:
             cursor = conn.cursor()
             cursor.execute("ALTER TABLE optimized_history ADD COLUMN opt_mode TEXT")
-            cursor.execute("ALTER TABLE optimized_history ADD COLUMN language TEXT")  # 顺便把语言也加上
+            cursor.execute("ALTER TABLE optimized_history ADD COLUMN language TEXT")
             conn.commit()
         except sqlite3.OperationalError:
-            # 说明列已经存在了，直接跳过
             pass
-        # 一次性查出：到期时间、SessionID、是否活跃 (is_active)
+
         cursor.execute("SELECT expiry_date, last_session_id, is_active FROM users WHERE user_id = ?", (user_id,))
         user_info = cursor.fetchone()
 
@@ -215,34 +220,25 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
             yield "❌ 用户不存在，任务终止"
             return
 
-        # 一次性解构三个字段
         expiry_date_str, last_sid, is_active = user_info
 
-        # 1. 检查是否被禁用
         if is_active == 0:
             yield "🛑 账号已被管理员禁用或注销，任务终止。"
             return
 
-        # 2. 检查到期时间
         if datetime.datetime.strptime(expiry_date_str, '%Y-%m-%d').date() < datetime.date.today():
             yield "❌ 账号已过期，请续费后使用"
             return
 
-        # # 3. 检查 Session ID (防止多端登录)
-        # if last_sid != current_sid:
-        #     yield "🛑 检测到账号在别处登录，当前任务已安全停止。"
-        #     return
         yield f"🚀 引擎启动 | 用户ID: {user_id} | 模式: {opt_mode}"
 
-        # 如果有断点数据，优先处理断点
         if existing_df is not None:
             files_to_process = [("BUFFER_TASK", existing_df)]
         else:
             files_to_process = [(f.name, f) for f in uploaded_files] if uploaded_files else []
 
         for fname_raw, file_source in files_to_process:
-            df = None  # 每一轮开始前强制重置，防止上一个文件的数据污染
-            # --- 1. 数据载入与文件名恢复 ---
+            df = None
             if fname_raw == "BUFFER_TASK":
                 df = file_source
                 fname = "Recovered_Task.xlsx"
@@ -255,16 +251,14 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                         sheet_to_read = selected_sheet if selected_sheet else 0
                         df = pd.read_excel(file_source, sheet_name=sheet_to_read)
                     else:
-                        # 定义一个尝试顺序，gb18030 兼容性比 gbk 更强
                         encodings_to_try = ['utf-8-sig', 'gb18030', 'utf-8']
                         df = None
                         last_err = None
 
                         for enc in encodings_to_try:
                             try:
-                                file_source.seek(0)  # 每次尝试前务必归零指针
+                                file_source.seek(0)
                                 df = pd.read_csv(file_source, encoding=enc)
-                                # print(f"成功使用 {enc} 读取文件") # 调试用
                                 break
                             except Exception as e:
                                 last_err = e
@@ -273,55 +267,69 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                         if df is None:
                             raise Exception(f"所有常用编码(UTF8/GBK)均无法解析: {last_err}")
 
-                    # 清理数据
                     df = df.dropna(axis=1, how='all').dropna(axis=0, how='all')
                     df = df.reset_index(drop=True)
 
                 except Exception as e:
-                    # 使用 f-string 配合 repr(e) 有时能看到更底层的报错原因
                     yield f"❌ 读取失败: {repr(e)}"
                     continue
 
-            # 成功后的后续逻辑...
             yield f"✅ 成功载入 {len(df)} 条数据"
+
             # --- 2. 标题列定位 (严格表头模式) ---
             target_col = None
-            # 定义你认可的“标题”关键字
             title_keywords = ['标题', 'title', 'name', '商品名称', '名称']
 
-            # 遍历所有列名，按顺序查找
             for col_name in df.columns:
-                # 转换为字符串并清理空格
                 clean_name = str(col_name).strip().lower()
-
-                # 核心判断：如果列名包含关键字，且【不是】自动生成的 Unnamed
                 if any(k in clean_name for k in title_keywords) and "unnamed" not in clean_name:
                     target_col = col_name
-                    break  # 找到第一个符合条件的就停下
+                    break
 
-            # --- 最终判定 ---
             if target_col:
                 yield f"✅ 已锁定标题列: {target_col}"
             else:
-                # 如果全表扫完都没有匹配的非空表头
                 yield "❌ 错误：未能在表格中找到有效的【标题】列，任务终止。"
-                return  # 直接结束函数，不再往下跑
+                return
+
+                # ─── 🎯 新增核心逻辑：违禁词包含则彻底剔除整行数据 ───
+            if delete_negative_rows and negative_keywords and negative_keywords.strip():
+                clean_neg_words = [w.strip() for w in negative_keywords.replace("，", ",").split(",") if w.strip()]
+                if clean_neg_words:
+                    yield f"🛡️ 已开启敏感词整行剔除，正在扫描原生标题违禁词..."
+                    initial_count = len(df)
+
+                    # 构造过滤条件：如果标题包含任意一个违禁词，返回 True
+                    def has_negative_word(val):
+                        if pd.isna(val):
+                            return False
+                        title_str = str(val).lower()
+                        return any(word.lower() in title_str for word in clean_neg_words)
+
+                    # 找出所有包含违禁词的行掩码
+                    drop_mask = df[target_col].apply(has_negative_word)
+
+                    # 剔除这些行，并重新重置索引
+                    df = df[~drop_mask].reset_index(drop=True)
+                    deleted_count = initial_count - len(df)
+                    if deleted_count > 0:
+                        yield f"🚨 [前置过滤] 发现并彻底踢除了 {deleted_count} 行包含违禁词的数据，剩余可优化数据: {len(df)} 条。"
+                    else:
+                        yield f"✅ 前置扫描完成，未发现包含违禁词的原生行数据。"
+
             if 'AI_Status' not in df.columns:
                 df['AI_Status'] = "Pending"
             else:
                 df['AI_Status'] = df['AI_Status'].fillna("Pending").astype(str)
-            # 内部函数：处理列组合输入
+
             def prepare_input(row):
                 val = row.get(target_col, "")
                 original_title = str(val).strip() if pd.notna(val) else ""
-                # 如果原标题是空的，AI 也没法优化，后面会跳过
                 if not original_title or original_title.lower() == 'nan':
                     return ""
                 if opt_mode == "列组合优化" and selected_extra_cols:
-                    # 过滤掉 nan 值并拼接
                     extra_parts = []
                     for col in selected_extra_cols:
-                        # 确保只合并存在的列，且排除 nan
                         if col in row and pd.notna(row[col]):
                             c_val = str(row[col]).strip()
                             if c_val.lower() != 'nan' and c_val != "":
@@ -344,7 +352,6 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                         input_str = prepare_input(row)
                         raw_groups.setdefault(input_str, []).append(idx)
 
-                    # 分组切片逻辑 (deduplicate_limit)
                     for input_val, all_indices in raw_groups.items():
                         for i in range(0, len(all_indices), deduplicate_limit):
                             chunk = all_indices[i: i + deduplicate_limit]
@@ -361,16 +368,9 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
 
                 # --- 4. Batch 批处理执行 ---
                 for i in range(0, total_unique, batch_size):
-                    # 【防多端登录校验】
-                    cursor.execute("SELECT last_session_id FROM users WHERE user_id = ?", (user_id,))
-                    # if cursor.fetchone()[0] != current_sid:
-                    #     yield "🛑 检测到账号在别处登录，当前任务已安全停止。"
-                    #     return  # 进入 finally 关闭连接
-
                     current_batch_keys = unique_keys[i: i + batch_size]
                     batch_payload = {}
 
-                    # 【数据库缓存预检】
                     for b_idx, k in enumerate(current_batch_keys):
                         raw_input = k.split("__grp")[0].split("__row")[0]
                         cursor.execute("""
@@ -380,7 +380,7 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                                             AND platform = ? 
                                             AND char_limit = ?
                                             AND opt_mode = ?
-                                        """, (user_id, raw_input, platform, char_limit,opt_mode))
+                                        """, (user_id, raw_input, platform, char_limit, opt_mode))
                         cache = cursor.fetchone()
 
                         if cache:
@@ -391,7 +391,6 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                         else:
                             batch_payload[b_idx] = raw_input
 
-                    # 【调用 AI 引擎】
                     total_count = len(current_batch_keys)
                     cache_hit_count = total_count - len(batch_payload)
 
@@ -399,30 +398,25 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                         yield f"💾 缓存命中：已自动恢复 {cache_hit_count} 条记录，剩余 {len(batch_payload)} 条请求 AI..."
                     if batch_payload:
                         results, log_msg = ai_rewrite_engine(
-                            id_titles_dict=batch_payload,  # 1. 这一批次的原始标题
-                            char_limit=char_limit,  # 2. 字符限制 (从函数参数来)
-                            platform=platform,  # 3. 平台 (从函数参数来)
-                            language=language,  # 4. 语言 (从函数参数来)
-                            key_pool=key_pool,  # 5. API密钥池
-                            model_name=model_name,  # 6. 模型名称
-                            base_url=base_url,  # 7. 接口地址
-                            is_retry=(round_idx > 1),  # 8. 是否重试
-                            temperature=temperature,  # 9. 随机度
-                            opt_mode=opt_mode,  # 10. 模式
-                            negative_keywords=negative_keywords  # 11. 违禁词
-                        ) # 此处传入你的参数
-                        # ============= 新增内存监控逻辑 =============
+                            id_titles_dict=batch_payload,
+                            char_limit=char_limit,
+                            platform=platform,
+                            language=language,
+                            key_pool=key_pool,
+                            model_name=model_name,
+                            base_url=base_url,
+                            is_retry=(round_idx > 1),
+                            temperature=temperature,
+                            opt_mode=opt_mode,
+                            negative_keywords=negative_keywords
+                        )
                         current_mem = get_memory_info()
-                        # 实时打印到控制台（运维看）
                         print(f"DEBUG: 用户 {user_id} 进度 {i}/{total_unique} | 内存: {current_mem:.2f} MB")
 
-                        # 实时反馈给前端（你朋友看）
-                        # 如果内存超过 400MB (512MB机器的红线)，给予警告
                         if current_mem > 400:
                             yield f"⚠️ 系统内存警告: {current_mem:.0f}MB / 512MB。检测到内存极高，正在尝试清理..."
-                            gc.collect()  # 强制执行垃圾回收
-                        # ==========================================
-                        # 回填并存入数据库
+                            gc.collect()
+
                         for batch_id, (opt_text, status) in results.items():
                             target_key = current_batch_keys[batch_id]
                             clean_text = target_key.split("__grp")[0].split("__row")[0]
@@ -435,9 +429,9 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
 
                                 cursor.execute("""
                                     INSERT OR REPLACE INTO optimized_history 
-                                    (user_id, original_input, optimized_title, platform, char_limit,opt_mode, timestamp) 
+                                    (user_id, original_input, optimized_title, platform, char_limit, opt_mode, timestamp) 
                                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """, (user_id, clean_text, opt_text, platform, char_limit,opt_mode, now_time))
+                                """, (user_id, clean_text, opt_text, platform, char_limit, opt_mode, now_time))
                         conn.commit()
                     else:
                         log_msg = "⚡ 100% 缓存命中（零秒恢复）"
@@ -447,19 +441,15 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                     if i + batch_size < total_unique and batch_payload:
                         time.sleep(sleep_time)
 
-                # 单个文件处理完成
             final_stats = df['AI_Status'].value_counts()
             yield f"📊 {fname} 处理完成！成功: {final_stats.get('Optimized', 0)} 条。"
             processed_results.append((fname, df))
 
-            # --- 6. 全部文件处理结束信号 (放在循环外) ---
         yield "FINISH_SIGNAL"
         yield processed_results
 
     except Exception as e:
-        # 捕获运行中的任何崩溃
         yield f"❌ 任务运行出错: {str(e)}"
 
     finally:
-        # --- 7. 无论如何，确保连接关闭 ---
         conn.close()

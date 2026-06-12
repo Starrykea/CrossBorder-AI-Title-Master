@@ -272,6 +272,14 @@ with st.sidebar:
         placeholder="例如: Best, Cheap, Nike, Medical",
         help="AI在优化标题时会严格避开这些词汇"
     )
+
+    # 🎯 核心新增：控制违禁词是拦截还是整行删除的开关
+    delete_negative_rows = st.toggle(
+        "💡 包含违禁词直接剔除整行",
+        value=False,
+        help="【关闭】: 走原来逻辑，AI 优化标题时会尝试避开或过滤这些词。\n【开启】: 前置扫描，只要原标题里含有以上任意一个违禁词，直接整行数据彻底删除，不消耗 AI 额度。"
+    )
+
     engine_type = st.selectbox("AI 引擎", ["Google Gemini", "DeepSeek", "OpenAI GPT"])
 
     # 2. 根据引擎动态计算默认 URL
@@ -316,9 +324,8 @@ with st.sidebar:
     char_limit = st.slider("标题字符上限", 10, 200, 60)
     sleep_time = st.slider("🔥 间隔休眠时间 (秒)", 0.0, 50.0, 10.0, step=0.5)
 
-    target_platform = st.selectbox("目标平台", ["Mercado Libre", "Amazon", "Shopee", "Rakuten.fr","noon","allegro"])
-    # 语言增加了法语选项
-    target_lang = st.selectbox("目标语言", ["英语", "法语", "西班牙语", "葡萄牙语", "中文","波兰语"])
+    target_platform = st.selectbox("目标平台", ["Mercado Libre", "Amazon", "Shopee", "Rakuten.fr", "noon", "allegro"])
+    target_lang = st.selectbox("目标语言", ["英语", "法语", "西班牙语", "葡萄牙语", "中文", "波兰语"])
 
     batch_size = st.number_input("📦 每批次处理个数", min_value=1, max_value=100, value=50)
 
@@ -460,7 +467,8 @@ with tab_seo:
                         opt_mode=opt_mode,
                         selected_extra_cols=selected_extra_cols,
                         negative_keywords=negative_keywords,
-                        selected_sheet = selected_sheet  # 👈 确保这里传了 UI 右侧选中的值
+                        selected_sheet=selected_sheet,  # 👈 确保这里传了 UI 右侧选中的值
+                        delete_negative_rows=delete_negative_rows  # 🎯 注入灵魂：无缝打通前端控制开关
                     )
 
                     for msg in task_gen:
