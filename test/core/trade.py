@@ -159,8 +159,9 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
                     {"role": "user", "content": prompt}
                 ],
                 temperature=temperature,
-                timeout=120
+                timeout=30
             )
+
             output = response.choices[0].message.content
             matches = re.findall(r'#(\d+)[:：](.*)', output)
             batch_results = {}
@@ -416,7 +417,7 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                         if current_mem > 400:
                             yield f"⚠️ 系统内存警告: {current_mem:.0f}MB / 512MB。检测到内存极高，正在尝试清理..."
                             gc.collect()
-
+                            time.sleep(0.2)
                         for batch_id, (opt_text, status) in results.items():
                             target_key = current_batch_keys[batch_id]
                             clean_text = target_key.split("__grp")[0].split("__row")[0]
