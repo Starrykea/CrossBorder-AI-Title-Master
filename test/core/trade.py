@@ -159,7 +159,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
                     {"role": "user", "content": prompt}
                 ],
                 temperature=temperature,
-                timeout=30
+                timeout=120
             )
 
             output = response.choices[0].message.content

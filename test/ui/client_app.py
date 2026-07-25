@@ -299,7 +299,7 @@ with st.sidebar:
         model_name = st.text_input("当前模型名称", value=sel_m)
 
     elif engine_type == "DeepSeek":
-        model_opts = ["deepseek-chat", "deepseek-reasoner"]
+        model_opts = ["deepseek-flash", "deepseek-pro"]
         sel_m = st.selectbox("模型切换", model_opts, index=0)
         model_name = st.text_input("当前模型名称", value=sel_m)
 
