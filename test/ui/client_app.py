@@ -294,7 +294,7 @@ with st.sidebar:
 
     # 3. 根据引擎动态切换模型选择
     if engine_type == "Google Gemini":
-        gemini_opts = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+        gemini_opts = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.5-flash"]
         sel_m = st.selectbox("模型切换", gemini_opts, index=0)
         model_name = st.text_input("当前模型名称", value=sel_m)
 
@@ -304,7 +304,7 @@ with st.sidebar:
         model_name = st.text_input("当前模型名称", value=sel_m)
 
     else:  # OpenAI GPT
-        gpt_opts = ["gpt-4o", "gpt-4o-mini", "o1-mini", "gpt-4-turbo"]
+        gpt_opts = ["gpt-4o", "gpt-4o-mini", "o1-mini", "gpt-5.6-terra"]
         sel_m = st.selectbox("模型切换", gpt_opts, index=0)
         model_name = st.text_input("当前模型名称", value=sel_m)
 
