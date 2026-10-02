@@ -1,19 +1,18 @@
 import gc
 import os
-
 import pandas as pd
 import time
 import re
 import itertools
 import io
-
 import psutil
-from openai import OpenAI
+from openai import AsyncOpenAI  # 🟢 改用异步客户端
 import sqlite3
 import datetime
+import asyncio  # 🟢 引入 asyncio 支持流式异步调度
 
 # 定义版本号
-VERSION = "v2.5.4-FilterRows"
+VERSION = "v2.5.4-FilterRows-Stream"
 
 
 def get_memory_info():
@@ -28,21 +27,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 db_path = os.path.abspath(os.path.join(BASE_DIR, "..", "seo_master.db"))
 
 
-def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, model_name, base_url,
-                      is_retry=False, temperature=0, opt_mode="AI优化标题", negative_keywords=""):
+async def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, model_name, base_url,
+                            is_retry=False, temperature=0, opt_mode="AI优化标题", negative_keywords=""):
     """
-    核心优化引擎：逻辑完全保持不变，仅修复违禁词，去除 self 错误引用
+    核心优化引擎：已修改为 Async Stream 异步流式传输
     """
-    import re
-    import time
-    from openai import OpenAI  # 确保安全导入
-
     if not id_titles_dict:
         return {}, "Empty"
 
     input_payload = "\n".join([f"#{k}: {v}" for k, v in id_titles_dict.items()])
 
-    # ─── 🛠️ 1. 违禁词指令解析（保持原生结构，仅增强提取） ───
+    # ─── 🛠️ 1. 违禁词指令解析 ───
     neg_instruction = ""
     neg_warning_flat = ""
     if negative_keywords and negative_keywords.strip():
@@ -54,7 +49,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
 
     retry_warning = ""
     if is_retry:
-        retry_warning = f"\n⚠️ [重要] 之前的尝试依然超长，包含空格必须在 {char_limit} 字符以内，确保达标！"
+        retry_warning = f"\n⚠️️ [重要] 之前的尝试依然超长，包含空格必须在 {char_limit} 字符以内，确保达标！"
 
     mode_instruction = ""
     if opt_mode == "列组合优化":
@@ -66,7 +61,7 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
     else:
         mode_instruction = "3. **SEO优化要求**：对原标题进行语义精简，提取核心卖点，提升点击率。"
 
-    # ─── 🛠️ 2. 平台规则判断（内部每一句文案完全保持你原本的逻辑） ───
+    # ─── 🛠️ 2. 平台规则判断 ───
     if "乐天" in platform or "Rakuten.fr" in platform.lower():
         platform_instruction = (
             f"你现在是【乐天 Rakuten】SEO专家。要求如下：\n"
@@ -132,37 +127,44 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
         f"6. **列组合约束**：{'必须完整保留 [附加关键词] 内容，不得删减。' if opt_mode == '列组合优化' else '精简非核心修饰词。'}"
     )
 
-    # ─── 🛠️ 3. Prompt 组装与 System 动态注入（增加禁词双层把控） ───
+    # ─── 🛠️ 3. Prompt 组装与 System 动态注入 ───
     prompt = (
         f"{platform_instruction}\n"
         f"{common_rules}\n"
         f"语言要求：{language}，句子要纯正语言，包括介词也要用相对应的语言\n"
-        f"{neg_instruction}\n"  # 保持原位
+        f"{neg_instruction}\n"
         f"格式要求：只返回 '#ID: 结果'，每行一条。\n"
         f"待处理数据：\n{input_payload}\n{retry_warning}"
     )
 
     system_content = "Professional SEO expert. Strictly follows char limits."
     if neg_warning_flat:
-        # 如果有违禁词，强行打到 System 大脑神经元上
         system_content += f" CRITICAL RULE: Under NO circumstances are you allowed to use these words: {neg_warning_flat}."
 
-    # ─── 🛠️ 4. 循环调用与接口提取逻辑 ───
+    # ─── 🛠️ 4. 异步流式调用与接口提取逻辑 ───
     for attempt in range(1, 4):
         try:
             current_key = next(key_pool)
-            client = OpenAI(api_key=current_key, base_url=base_url)
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_content},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=temperature,
-                timeout=120
-            )
+            # 🟢 使用异步 AsyncOpenAI 客户端
+            async with AsyncOpenAI(api_key=current_key, base_url=base_url) as client:
+                response_stream = await client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=temperature,
+                    stream=True,  # 🟢 开启异步流式响应
+                    timeout=120
+                )
 
-            output = response.choices[0].message.content
+                output_chunks = []
+                async for chunk in response_stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        output_chunks.append(chunk.choices[0].delta.content)
+
+                output = "".join(output_chunks).strip()
+
             matches = re.findall(r'#(\d+)[:：](.*)', output)
             batch_results = {}
             success_count = 0
@@ -172,11 +174,10 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
                 optimized_text = " ".join(m_content.strip().replace(',', ' ').split())
                 status = "Optimized" if len(optimized_text) <= char_limit else "Retry_Needed"
 
-                # ─── 🛡️ 唯一核心进化：本地代码级防护盾（已去除 self 引用，改为 standard print） ───
                 if negative_keywords and negative_keywords.strip():
                     for word in clean_neg_words:
                         if word.lower() in optimized_text.lower():
-                            status = "Retry_Needed"  # 抓到违禁词，强行拦截打入重试队列
+                            status = "Retry_Needed"
                             print(f"⚠️ [探针警报] 拦截到 AI 标题 #{u_id} 中漏出违禁词 '{word}'，已强行打回重试！")
                             break
 
@@ -185,7 +186,9 @@ def ai_rewrite_engine(id_titles_dict, char_limit, platform, language, key_pool, 
 
             return batch_results, f"OK({success_count}/{len(id_titles_dict)})"
         except Exception as e:
-            if attempt < 3: time.sleep(3); continue
+            if attempt < 3:
+                await asyncio.sleep(3)
+                continue
             return {}, f"API_Error: {str(e)}"
     return {}, "Max_Retries_Exceeded"
 
@@ -195,9 +198,9 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                             temperature=0.7,
                             existing_df=None, opt_mode="AI优化标题", selected_extra_cols=None, selected_sheet=None,
                             negative_keywords=None,
-                            delete_negative_rows=False):  # 🎯 核心新增参数：delete_negative_rows 控制开关
+                            delete_negative_rows=False):
     """
-    任务分发函数：修复断点续传下的文件名丢失与结果合并问题
+    任务分发函数：在同步生成器中通过 asyncio.run 调用异步流式引擎
     """
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -293,24 +296,19 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                 yield "❌ 错误：未能在表格中找到有效的【标题】列，任务终止。"
                 return
 
-                # ─── 🎯 新增核心逻辑：违禁词包含则彻底剔除整行数据 ───
             if delete_negative_rows and negative_keywords and negative_keywords.strip():
                 clean_neg_words = [w.strip() for w in negative_keywords.replace("，", ",").split(",") if w.strip()]
                 if clean_neg_words:
                     yield f"🛡️ 已开启敏感词整行剔除，正在扫描原生标题违禁词..."
                     initial_count = len(df)
 
-                    # 构造过滤条件：如果标题包含任意一个违禁词，返回 True
                     def has_negative_word(val):
                         if pd.isna(val):
                             return False
                         title_str = str(val).lower()
                         return any(word.lower() in title_str for word in clean_neg_words)
 
-                    # 找出所有包含违禁词的行掩码
                     drop_mask = df[target_col].apply(has_negative_word)
-
-                    # 剔除这些行，并重新重置索引
                     df = df[~drop_mask].reset_index(drop=True)
                     deleted_count = initial_count - len(df)
                     if deleted_count > 0:
@@ -398,18 +396,21 @@ def start_optimization_task(uploaded_files, platform, char_limit, language, api_
                     if cache_hit_count > 0 and len(batch_payload) > 0:
                         yield f"💾 缓存命中：已自动恢复 {cache_hit_count} 条记录，剩余 {len(batch_payload)} 条请求 AI..."
                     if batch_payload:
-                        results, log_msg = ai_rewrite_engine(
-                            id_titles_dict=batch_payload,
-                            char_limit=char_limit,
-                            platform=platform,
-                            language=language,
-                            key_pool=key_pool,
-                            model_name=model_name,
-                            base_url=base_url,
-                            is_retry=(round_idx > 1),
-                            temperature=temperature,
-                            opt_mode=opt_mode,
-                            negative_keywords=negative_keywords
+                        # 🟢 驱动异步协程执行流式 AI Rewrite Engine
+                        results, log_msg = asyncio.run(
+                            ai_rewrite_engine(
+                                id_titles_dict=batch_payload,
+                                char_limit=char_limit,
+                                platform=platform,
+                                language=language,
+                                key_pool=key_pool,
+                                model_name=model_name,
+                                base_url=base_url,
+                                is_retry=(round_idx > 1),
+                                temperature=temperature,
+                                opt_mode=opt_mode,
+                                negative_keywords=negative_keywords
+                            )
                         )
                         current_mem = get_memory_info()
                         print(f"DEBUG: 用户 {user_id} 进度 {i}/{total_unique} | 内存: {current_mem:.2f} MB")
