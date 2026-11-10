@@ -284,17 +284,17 @@ with st.sidebar:
 
     # 2. 根据引擎动态计算默认 URL
     if engine_type == "Google Gemini":
-        default_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        default_url = "https://toolcode.cc/v1"
     elif engine_type == "DeepSeek":
-        default_url = "https://api.deepseek.com"
+        default_url = "https://toolcode.cc/v1"
     else:  # OpenAI GPT
-        default_url = "https://api.openai.com/v1"
+        default_url = "https://toolcode.cc/v1"
 
     base_url = st.text_input("API URL", value=default_url)
 
     # 3. 根据引擎动态切换模型选择
     if engine_type == "Google Gemini":
-        gemini_opts = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.5-flash"]
+        gemini_opts = ["gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-2.5-flash"]
         sel_m = st.selectbox("模型切换", gemini_opts, index=0)
         model_name = st.text_input("当前模型名称", value=sel_m)
 
@@ -304,7 +304,7 @@ with st.sidebar:
         model_name = st.text_input("当前模型名称", value=sel_m)
 
     else:  # OpenAI GPT
-        gpt_opts = ["gpt-4o", "gpt-4o-mini", "o1-mini", "gpt-5.6-terra"]
+        gpt_opts = [ "gpt-6-astra", "gpt-5.6-terra","gpt-6.1-sol","gpt-6-sol"]
         sel_m = st.selectbox("模型切换", gpt_opts, index=0)
         model_name = st.text_input("当前模型名称", value=sel_m)
 
